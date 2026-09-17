@@ -95,23 +95,47 @@ def delete_uploaded_media(value: str | None) -> bool:
 def _ocr(path: Path) -> str:
     try:
         result = subprocess.run(
-            ["tesseract", str(path), "stdout", "-l", "ara+eng", "--psm", "6"],
+            [
+                "tesseract",
+                str(path),
+                "stdout",
+                "-l",
+                settings.ocr_languages,
+                "--psm",
+                "6",
+            ],
             capture_output=True,
             text=True,
-            timeout=45,
+            timeout=60,
             check=False,
         )
-        return " ".join(result.stdout.split())[:2500]
+        return " ".join(result.stdout.split())[:3500]
     except Exception:
         return ""
 
 
-def _phash(path: Path) -> str:
+def _phashes(path: Path) -> list[str]:
+    """Return full-frame and centered-crop hashes to tolerate borders/subtitles/crops."""
     try:
         with Image.open(path) as image:
-            return str(imagehash.phash(image.convert("RGB")))
+            image = image.convert("RGB")
+            width, height = image.size
+            variants = [image]
+            for ratio in (0.86, 0.72):
+                crop_w = max(16, int(width * ratio))
+                crop_h = max(16, int(height * ratio))
+                left = max(0, (width - crop_w) // 2)
+                top = max(0, (height - crop_h) // 2)
+                variants.append(image.crop((left, top, left + crop_w, top + crop_h)))
+
+            hashes: list[str] = []
+            for variant in variants:
+                value = str(imagehash.phash(variant))
+                if value not in hashes:
+                    hashes.append(value)
+            return hashes
     except Exception:
-        return ""
+        return []
 
 
 def _vision_input(path: Path, target: Path) -> Path | None:
@@ -169,9 +193,18 @@ def _extract_video_frames(path: Path, directory: Path, max_frames: int) -> list[
     try:
         subprocess.run(
             [
-                "ffmpeg", "-loglevel", "error", "-i", str(path),
-                "-vf", "fps=1/12,scale=1280:-2:force_original_aspect_ratio=decrease",
-                "-frames:v", str(max_frames), "-q:v", "3", pattern,
+                "ffmpeg",
+                "-loglevel",
+                "error",
+                "-i",
+                str(path),
+                "-vf",
+                "fps=1/12,scale=1280:-2:force_original_aspect_ratio=decrease",
+                "-frames:v",
+                str(max_frames),
+                "-q:v",
+                "3",
+                pattern,
             ],
             capture_output=True,
             timeout=180,
@@ -194,9 +227,22 @@ def _video_transcript(path: Path, work: Path) -> str:
         output = work / "transcript"
         extracted = subprocess.run(
             [
-                "ffmpeg", "-y", "-loglevel", "error", "-i", str(path),
-                "-t", str(settings.video_transcribe_max_seconds),
-                "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", str(audio),
+                "ffmpeg",
+                "-y",
+                "-loglevel",
+                "error",
+                "-i",
+                str(path),
+                "-t",
+                str(settings.video_transcribe_max_seconds),
+                "-vn",
+                "-ac",
+                "1",
+                "-ar",
+                "16000",
+                "-c:a",
+                "pcm_s16le",
+                str(audio),
             ],
             capture_output=True,
             timeout=180,
@@ -261,9 +307,7 @@ def media_features(input_url: str | None, input_type: str, max_frames: int) -> d
     if input_type == "image" or suffix in IMAGE_EXTS:
         result["ocr"] = _ocr(path)
         result["vision"] = _vision_describe(path)
-        fingerprint = _phash(path)
-        if fingerprint:
-            result["hashes"] = [fingerprint]
+        result["hashes"] = _phashes(path)
     elif input_type == "video" or suffix in VIDEO_EXTS:
         try:
             with tempfile.TemporaryDirectory(dir=tmp_root) as directory:
@@ -277,16 +321,16 @@ def media_features(input_url: str | None, input_type: str, max_frames: int) -> d
                     text = _ocr(frame)
                     if text and text not in ocr_chunks:
                         ocr_chunks.append(text)
-                    fingerprint = _phash(frame)
-                    if fingerprint and fingerprint not in hashes:
-                        hashes.append(fingerprint)
+                    for fingerprint in _phashes(frame):
+                        if fingerprint not in hashes:
+                            hashes.append(fingerprint)
                 for frame in visual_frames:
                     description = _vision_describe(frame)
                     if description and description not in vision_chunks:
                         vision_chunks.append(description)
-                result["ocr"] = " ".join(ocr_chunks)[:5000]
+                result["ocr"] = " ".join(ocr_chunks)[:6500]
                 result["vision"] = " | ".join(vision_chunks)[:6500]
-                result["hashes"] = hashes[:max_frames]
+                result["hashes"] = hashes[: max_frames * 3]
                 result["transcript"] = _video_transcript(path, work)
         except Exception:
             pass
@@ -300,17 +344,3 @@ def media_features(input_url: str | None, input_type: str, max_frames: int) -> d
         except OSError:
             pass
     return result
-
-
-def enrich_query(base_query: str, input_url: str | None, input_type: str, max_frames: int) -> str:
-    features = media_features(input_url, input_type=input_type, max_frames=max_frames)
-    parts = [
-        part.strip()
-        for part in (base_query, features["ocr"], features["transcript"], features["vision"])
-        if part and part.strip()
-    ]
-    return " ".join(parts)[:12000]
-
-
-def visual_hashes(input_url: str | None, input_type: str, max_frames: int) -> list[str]:
-    return list(media_features(input_url, input_type=input_type, max_frames=max_frames).get("hashes", []))

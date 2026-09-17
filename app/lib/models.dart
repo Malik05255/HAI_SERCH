@@ -130,6 +130,30 @@ class SearchResult {
   bool get pageVerified => evidence['verified_page'] == true;
   double get visualScore => (evidence['visual_score'] as num?)?.toDouble() ?? 0;
 
+  List<Uri> get sourceUris {
+    final values = <String>[url];
+    final raw = evidence['supporting_sources'];
+    if (raw is List) {
+      for (final item in raw) {
+        if (item is Map && item['url'] is String) {
+          values.add(item['url'] as String);
+        }
+      }
+    }
+
+    final seen = <String>{};
+    final uris = <Uri>[];
+    for (final value in values) {
+      final uri = Uri.tryParse(value.trim());
+      if (uri == null || !const {'http', 'https'}.contains(uri.scheme)) continue;
+      final normalized = uri.toString();
+      if (seen.add(normalized)) uris.add(uri);
+    }
+    return uris;
+  }
+
+  int get supportingSourceCount => sourceUris.length;
+
   String? get evidenceLabel {
     if (visualMatch && visualScore >= 90) return 'تطابق بصري قوي جدًا';
     if (visualMatch) return 'تطابق بصري قوي';

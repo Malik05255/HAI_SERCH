@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from .auth import Principal, create_pair_code, pair_device, register_device, require_principal
 from .config import settings
-from .database import Base, engine, get_db
+from .database import ensure_schema, get_db
 from .media import (
     IMAGE_EXTS,
     VIDEO_EXTS,
@@ -27,7 +27,7 @@ from .schemas import JobCreate, JobOut, ResultOut
 CREATE_LOCK_KEY = 847251902
 FINAL_STATES = ("completed", "partial", "failed", "needs_context", "cancelled")
 CONTINUABLE_STATES = ("completed", "partial", "failed", "needs_context")
-app = FastAPI(title=settings.app_name, version="0.9.0")
+app = FastAPI(title=settings.app_name, version="0.10.0")
 
 
 class DeviceCreate(BaseModel):
@@ -42,12 +42,7 @@ class PairDevice(BaseModel):
 @app.on_event("startup")
 def startup() -> None:
     Path(settings.data_dir, "uploads").mkdir(parents=True, exist_ok=True)
-    Base.metadata.create_all(bind=engine)
-    with engine.begin() as connection:
-        connection.exec_driver_sql("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS account_id VARCHAR(36) NULL")
-        connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_jobs_account_id ON jobs (account_id)")
-        connection.exec_driver_sql("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS last_error TEXT NULL")
-        connection.exec_driver_sql("ALTER TABLE devices ADD COLUMN IF NOT EXISTS push_token TEXT NULL")
+    ensure_schema()
 
 
 def _queue_positions(db: Session, account_id: str) -> dict[str, int]:
@@ -217,14 +212,13 @@ async def upload(file: UploadFile, principal: Principal = Depends(require_princi
                 raise HTTPException(status_code=413, detail="image file too large")
             if probe.width * probe.height > settings.image_max_pixels:
                 raise HTTPException(status_code=413, detail="image dimensions too large")
-            final_suffix = supplied_suffix if supplied_suffix in IMAGE_EXTS else probe.canonical_suffix
         else:
             if probe.duration <= 0:
                 raise HTTPException(status_code=415, detail="invalid video duration")
             if probe.duration > settings.video_max_duration_seconds:
                 raise HTTPException(status_code=413, detail="video is too long")
-            final_suffix = supplied_suffix if supplied_suffix in VIDEO_EXTS else probe.canonical_suffix
 
+        final_suffix = probe.canonical_suffix
         if destination.suffix.casefold() != final_suffix:
             normalized = destination.with_suffix(final_suffix)
             destination.rename(normalized)
@@ -303,8 +297,19 @@ def get_job(job_id: str, principal: Principal = Depends(require_principal), db: 
 
 @app.get("/v1/jobs/{job_id}/results", response_model=list[ResultOut])
 def get_results(job_id: str, principal: Principal = Depends(require_principal), db: Session = Depends(get_db)) -> list[Result]:
-    _owned_job(db, job_id, principal)
-    return list(db.scalars(select(Result).where(Result.job_id == job_id).order_by(Result.rank.asc())).all())
+    job = _owned_job(db, job_id, principal)
+    return list(
+        db.scalars(
+            select(Result)
+            .where(
+                Result.job_id == job_id,
+                Result.rank > 0,
+                Result.match_score >= settings.search_min_result_score,
+            )
+            .order_by(Result.rank.asc())
+            .limit(job.target_results)
+        ).all()
+    )
 
 
 @app.get("/v1/jobs/{job_id}/media")

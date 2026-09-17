@@ -204,9 +204,6 @@ class _SearchPageState extends State<SearchPage> {
         inputType = (upload['input_type'] as String?) ?? mode;
       }
       final job = await widget.api.createJob(query: query, inputType: inputType, uploadId: uploadId);
-      if (filePath != null && mode != 'text') {
-        await widget.archive.rememberSource(job.id, filePath!, fileName ?? 'media');
-      }
       controller.clear();
       setState(() {
         filePath = null;
@@ -633,7 +630,6 @@ class JobCard extends StatelessWidget {
     await archive.archiveJob(job, results);
     try {
       if (job.isActive) await api.action(job.id, 'cancel');
-      await archive.discardPending(job.id);
       onArchiveChanged();
       await onChanged();
     } catch (_) {
@@ -646,7 +642,7 @@ class JobCard extends StatelessWidget {
     try {
       if (value == 'archive') {
         if (job.isActive) {
-          final confirmed = await _confirm(context, 'حفظ في الأرشيف', 'سيتم حفظ المهمة والمرفق على هذا الجهاز ثم إلغاء البحث الحالي.');
+          final confirmed = await _confirm(context, 'حفظ في الأرشيف', 'سيتم تنزيل المرفق من السحابة وحفظ المهمة على هذا الجهاز ثم إلغاء البحث الحالي.');
           if (!confirmed || !context.mounted) return;
         }
         await _archiveLocally(context);
@@ -654,14 +650,12 @@ class JobCard extends StatelessWidget {
         final confirmed = await _confirm(context, 'حذف المهمة', 'سيتم حذف المهمة ونتائجها ومرفقها من السحابة.');
         if (!confirmed) return;
         if (job.status == 'running') await api.action(job.id, 'cancel');
-        await archive.discardPending(job.id);
         await api.deleteJob(job.id);
         await onChanged();
       } else if (value == 'cancel') {
         final confirmed = await _confirm(context, 'إلغاء البحث', 'سيتم إيقاف البحث وحذف المرفق من السحابة.');
         if (!confirmed) return;
         await api.action(job.id, 'cancel');
-        await archive.discardPending(job.id);
         await onChanged();
       } else {
         await api.action(job.id, value);
@@ -753,23 +747,79 @@ class ResultCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final imageUrl = item.imageUrl?.trim();
+    final showImage = imageUrl != null &&
+        imageUrl.isNotEmpty &&
+        (imageUrl.startsWith('https://') || imageUrl.startsWith('http://'));
+    final sourceUri = Uri.tryParse(item.url);
+
     return Card(
+      clipBehavior: Clip.antiAlias,
       child: Padding(
         padding: const EdgeInsets.all(14),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Row(children: [
+          if (showImage) ...[
+            ClipRRect(
+              borderRadius: BorderRadius.circular(12),
+              child: SizedBox(
+                width: double.infinity,
+                height: 180,
+                child: Image.network(
+                  imageUrl,
+                  fit: BoxFit.cover,
+                  errorBuilder: (_, __, ___) => Container(
+                    color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                    alignment: Alignment.center,
+                    child: Icon(Icons.broken_image_outlined, color: Theme.of(context).colorScheme.outline),
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
+          ],
+          Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
             CircleAvatar(child: Text('${item.rank}')),
             const SizedBox(width: 10),
             Expanded(child: Text(item.title, style: const TextStyle(fontWeight: FontWeight.w700))),
-            Text('${item.score.toStringAsFixed(0)}%'),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+              decoration: BoxDecoration(
+                color: Theme.of(context).colorScheme.primaryContainer,
+                borderRadius: BorderRadius.circular(20),
+              ),
+              child: Text('${item.score.toStringAsFixed(0)}%', style: const TextStyle(fontWeight: FontWeight.w700)),
+            ),
           ]),
-          if (item.summary.isNotEmpty) ...[
+          if (item.pageVerified || item.evidenceLabel != null) ...[
             const SizedBox(height: 10),
-            Text(item.summary, maxLines: 7, overflow: TextOverflow.ellipsis),
+            Wrap(
+              spacing: 8,
+              runSpacing: 6,
+              children: [
+                if (item.pageVerified)
+                  const Chip(
+                    visualDensity: VisualDensity.compact,
+                    avatar: Icon(Icons.verified_outlined, size: 17),
+                    label: Text('تم التحقق من صفحة المصدر'),
+                  ),
+                if (item.evidenceLabel case final label?)
+                  Chip(
+                    visualDensity: VisualDensity.compact,
+                    avatar: const Icon(Icons.fact_check_outlined, size: 17),
+                    label: Text(label),
+                  ),
+              ],
+            ),
+          ],
+          if (item.rawSummary.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            Text(item.rawSummary, maxLines: 7, overflow: TextOverflow.ellipsis),
           ],
           const SizedBox(height: 8),
           TextButton.icon(
-            onPressed: () => launchUrl(Uri.parse(item.url), mode: LaunchMode.externalApplication),
+            onPressed: sourceUri == null
+                ? null
+                : () => launchUrl(sourceUri, mode: LaunchMode.externalApplication),
             icon: const Icon(Icons.open_in_new_rounded),
             label: const Text('المصدر'),
           ),
@@ -847,7 +897,6 @@ class _ResultsPageState extends State<ResultsPage> {
     setState(() => acting = true);
     try {
       await widget.archive.archiveJob(widget.job, results);
-      await widget.archive.discardPending(widget.job.id);
       widget.onArchiveChanged();
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('تم الحفظ في أرشيف هذا الجهاز')));

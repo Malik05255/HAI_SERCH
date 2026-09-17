@@ -22,6 +22,7 @@ from .research import run_research
 TITLE_TOKEN_RE = re.compile(r"[^\w\u0600-\u06ff]+", re.UNICODE)
 CREDENTIAL_URL_RE = re.compile(r"://[^@\s]+@")
 PUSH_COMPLETION_STATES = {"completed", "partial"}
+PURGE_MEDIA_STATES = {"completed", "partial", "failed"}
 
 
 def utcnow():
@@ -60,12 +61,12 @@ def purge_job_media(job) -> None:
         job.input_url = None
 
 
-def finish_job(db, job, status: str, progress: float | None = None, purge_media: bool = False) -> None:
+def finish_job(db, job, status: str, progress: float | None = None) -> None:
     job.status = status
     if progress is not None:
         job.progress = progress
     job.heartbeat_at = None
-    if purge_media:
+    if status in PURGE_MEDIA_STATES:
         purge_job_media(job)
 
     should_notify = status in PUSH_COMPLETION_STATES and settings.notifications_enabled

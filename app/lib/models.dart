@@ -49,16 +49,16 @@ class SearchResult {
     required this.rank,
     required this.title,
     required this.url,
-    required this.summary,
+    required String summary,
     required this.score,
     required this.evidence,
     this.imageUrl,
-  });
+  }) : _summary = summary;
 
   final int rank;
   final String title;
   final String url;
-  final String summary;
+  final String _summary;
   final double score;
   final String? imageUrl;
   final Map<String, dynamic> evidence;
@@ -92,11 +92,20 @@ class SearchResult {
     return null;
   }
 
+  String get rawSummary => _summary;
+
+  String get summary {
+    final label = evidenceLabel;
+    if (label == null) return _summary;
+    if (_summary.isEmpty) return label;
+    return '$label\n$_summary';
+  }
+
   Map<String, dynamic> toJson() => {
         'rank': rank,
         'title': title,
         'url': url,
-        'summary': summary,
+        'summary': _summary,
         'match_score': score,
         'image_url': imageUrl,
         'evidence': evidence,

@@ -71,7 +71,14 @@ jobs:
           echo "$KEYSTORE_B64" | base64 --decode > app/android/app/release.jks
       - run: python -m pip install pillow
       - run: python scripts/prepare_platforms.py
-      - run: python scripts/generate_icon.py
+      - name: Generate and verify Android identity assets
+        run: |
+          python scripts/generate_icon.py
+          test -f app/android/app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml
+          test -f app/android/app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml
+          test -f app/android/app/src/main/res/drawable-nodpi/ic_launcher_foreground.png
+          grep -q 'android:roundIcon="@mipmap/ic_launcher_round"' app/android/app/src/main/AndroidManifest.xml
+          grep -q 'applicationId = "com.hai.deep_search"' app/android/app/build.gradle.kts
       - run: flutter pub get
         working-directory: app
       - name: Run Flutter tests
@@ -114,7 +121,11 @@ jobs:
         working-directory: app
       - run: python -m pip install pillow
       - run: python scripts/prepare_platforms.py
-      - run: python scripts/generate_icon.py
+      - name: Generate and verify Windows identity assets
+        shell: pwsh
+        run: |
+          python scripts/generate_icon.py
+          if (-not (Test-Path app\windows\runner\resources\app_icon.ico)) { throw "Windows icon missing" }
       - run: flutter pub get
         working-directory: app
       - name: Build Windows

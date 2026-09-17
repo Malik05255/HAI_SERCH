@@ -15,6 +15,7 @@ class Settings(BaseSettings):
 
     searxng_url: str = "http://localhost:8080"
     search_max_results: int = 10
+    search_min_result_score: float = 12.0
     search_max_candidates: int = 250
     search_verify_pages_per_run: int = 40
     search_http_timeout_seconds: int = 15
@@ -52,8 +53,6 @@ class Settings(BaseSettings):
     firebase_project_id: str = ""
     firebase_service_account_b64: str = ""
 
-    # Public web egress only. SearXNG and other Docker-internal services always
-    # stay on the direct internal network and are never sent through this proxy.
     egress_mode: str = "auto"  # auto | direct | vpn
     egress_proxy_url: str = ""
 

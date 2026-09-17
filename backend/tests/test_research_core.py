@@ -1,7 +1,7 @@
 from collections import Counter
 
 from app.models import Result
-from app.research import _visual_match, make_queries, overlap_score
+from app.research import _best_overlap, _visual_match, make_queries, overlap_score
 from app.worker import _diverse_order
 
 
@@ -31,6 +31,18 @@ def test_multilingual_query_expansion_keeps_exact_evidence() -> None:
 def test_overlap_score_is_token_based() -> None:
     assert overlap_score("red car city", "A red car reached the city") == 1.0
     assert overlap_score("red car city", "Only a red bicycle") < 0.5
+
+
+def test_best_overlap_accepts_translated_planner_evidence() -> None:
+    queries = [
+        "فيلم صيني البطل لا يتزوج البطلة",
+        "Chinese movie hero does not marry heroine",
+        "男主角 最后 没有 娶 女主角",
+    ]
+    chinese_source = "故事结局 男主角 最后 没有 娶 女主角 两人分开"
+
+    assert overlap_score(queries[0], chinese_source) == 0.0
+    assert _best_overlap(queries, chinese_source) > 0.5
 
 
 def test_visual_hash_exact_match_scores_maximum() -> None:

@@ -1,28 +1,34 @@
 import asyncio
 import hmac
 import json
+from datetime import datetime, timezone
 
 import httpx
 from fastapi import Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from .auth import Principal, principal_for_token, require_principal
 from .config import settings
 from .database import SessionLocal, get_db
 from .egress import EgressRouter
-from .main import app
+from .main import CONTINUABLE_STATES, _job_out, _lock_capacity, _owned_job, _queue_positions, app
 from .models import Device, Job, Result
 
 
 RESULT_IMAGE_MAX_BYTES = 6 * 1024 * 1024
 REALTIME_INTERVAL_SECONDS = 2.0
+MAX_CONTEXT_CHARS = 12000
 
 
 class PushTokenUpdate(BaseModel):
     token: str | None = Field(default=None, max_length=4096)
+
+
+class JobClue(BaseModel):
+    text: str = Field(min_length=1, max_length=1500)
 
 
 @app.put("/v1/auth/push-token")
@@ -38,6 +44,59 @@ def update_push_token(
     device.push_token = token or None
     db.commit()
     return {"ok": True, "enabled": bool(device.push_token)}
+
+
+@app.post("/v1/jobs/{job_id}/clues")
+def add_job_clue(
+    job_id: str,
+    payload: JobClue,
+    principal: Principal = Depends(require_principal),
+    db: Session = Depends(get_db),
+) -> dict:
+    job = _owned_job(db, job_id, principal)
+    if job.status == "cancelled":
+        raise HTTPException(status_code=409, detail="cancelled job cannot accept clues")
+
+    clue = " ".join(payload.text.split()).strip()
+    if not clue:
+        raise HTTPException(status_code=422, detail="clue is empty")
+    current_context = (job.context_text or "").strip()
+    combined = f"{current_context}\n{clue}".strip() if current_context else clue
+    if len(combined) > MAX_CONTEXT_CHARS:
+        raise HTTPException(status_code=413, detail="research context is full")
+
+    if job.status in CONTINUABLE_STATES:
+        _lock_capacity(db, principal.account_id)
+        if job.attempts >= settings.search_max_attempts:
+            job.attempts = settings.search_continue_attempt_floor
+        else:
+            job.attempts = max(job.attempts, settings.search_continue_attempt_floor)
+        job.status = "queued"
+        job.stop_requested = False
+        job.next_run_at = datetime.now(timezone.utc)
+        job.heartbeat_at = None
+    elif job.status == "queued":
+        job.next_run_at = datetime.now(timezone.utc)
+    elif job.status not in {"running", "stopped"}:
+        raise HTTPException(status_code=409, detail="job cannot accept clues in current state")
+
+    job.context_text = combined
+    job.context_revision = int(job.context_revision or 0) + 1
+    job.last_error = None
+    job.found_count = 0
+    job.progress = 0.0
+
+    # A new clue changes the matching criteria. Keep the candidate rows as a
+    # reusable evidence cache, but remove their published rank/score until the
+    # worker verifies them again against the new context.
+    db.execute(
+        update(Result)
+        .where(Result.job_id == job.id)
+        .values(rank=0, match_score=0.0)
+    )
+    db.commit()
+    db.refresh(job)
+    return _job_out(job, _queue_positions(db, principal.account_id))
 
 
 def _realtime_snapshot(principal: Principal) -> list[dict] | None:
@@ -61,6 +120,7 @@ def _realtime_snapshot(principal: Principal) -> list[dict] | None:
                 "found_count": job.found_count,
                 "target_results": job.target_results,
                 "attempts": job.attempts,
+                "context_revision": job.context_revision,
                 "updated_at": job.updated_at.isoformat() if job.updated_at else None,
             }
             for job in jobs

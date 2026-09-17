@@ -55,6 +55,9 @@ class Settings(BaseSettings):
 
     egress_mode: str = "auto"  # auto | direct | vpn
     egress_proxy_url: str = ""
+    # Optional named HTTP(S) proxy exits, for example:
+    # asia=http://vpn-asia:8888,europe=http://vpn-europe:8888
+    egress_proxy_urls: str = ""
 
     github_repository: str = "Malik05255/HAI_SERCH"
 

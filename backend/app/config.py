@@ -24,6 +24,7 @@ class Settings(BaseSettings):
 
     video_max_upload_mb: int = 250
     video_max_keyframes: int = 12
+    cloud_media_quota_gb: int = 20
     temp_file_ttl_hours: int = 24
 
     egress_proxy_url: str = ""

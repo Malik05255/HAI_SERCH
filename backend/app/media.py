@@ -1,8 +1,13 @@
+import base64
 import json
 import re
 import subprocess
 import tempfile
 from pathlib import Path
+
+import httpx
+import imagehash
+from PIL import Image
 
 from .config import settings
 
@@ -11,6 +16,13 @@ IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
 VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v"}
 UPLOAD_ID_RE = re.compile(r"^[0-9a-f-]{36}(?:\.[a-z0-9]{1,8})?$")
 ACCOUNT_ID_RE = re.compile(r"^[0-9a-f-]{36}$")
+
+VISION_PROMPT = (
+    "Describe only what is visibly supported by this image for the purpose of finding its original source online. "
+    "Mention setting, people appearance without guessing identity, clothing, objects, logos, readable title clues, "
+    "cinematic style, animation/live-action, distinctive landmarks, and anything useful for identifying a movie, "
+    "series, video, product, place, or webpage. Do not invent names or facts. Be concise and search-oriented."
+)
 
 
 def _uploads_root() -> Path:
@@ -94,79 +106,126 @@ def _ocr(path: Path) -> str:
         return ""
 
 
-def _video_ocr(path: Path, max_frames: int) -> str:
-    tmp_root = Path(settings.data_dir, "tmp")
-    tmp_root.mkdir(parents=True, exist_ok=True)
-    chunks: list[str] = []
+def _phash(path: Path) -> str:
     try:
-        with tempfile.TemporaryDirectory(dir=tmp_root) as directory:
-            pattern = str(Path(directory, "frame-%02d.jpg"))
-            subprocess.run(
-                [
-                    "ffmpeg", "-loglevel", "error", "-i", str(path),
-                    "-vf", "fps=1/12,scale=1280:-2:force_original_aspect_ratio=decrease",
-                    "-frames:v", str(max_frames), "-q:v", "3", pattern,
-                ],
-                capture_output=True,
-                timeout=180,
-                check=False,
-            )
-            for frame in sorted(Path(directory).glob("frame-*.jpg"))[:max_frames]:
-                text = _ocr(frame)
-                if text and text not in chunks:
-                    chunks.append(text)
+        with Image.open(path) as image:
+            return str(imagehash.phash(image.convert("RGB")))
     except Exception:
         return ""
-    return " ".join(chunks)[:5000]
 
 
-def _video_transcript(path: Path) -> str:
+def _vision_input(path: Path, target: Path) -> Path | None:
+    try:
+        with Image.open(path) as image:
+            image = image.convert("RGB")
+            image.thumbnail((1024, 1024))
+            image.save(target, format="JPEG", quality=82, optimize=True)
+        return target
+    except Exception:
+        return None
+
+
+def _vision_describe(path: Path) -> str:
+    if not settings.vision_enabled:
+        return ""
+    try:
+        with tempfile.TemporaryDirectory(dir=Path(settings.data_dir, "tmp")) as directory:
+            normalized = _vision_input(path, Path(directory, "vision.jpg"))
+            if normalized is None:
+                return ""
+            encoded = base64.b64encode(normalized.read_bytes()).decode("ascii")
+            payload = {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": VISION_PROMPT},
+                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{encoded}"}},
+                        ],
+                    }
+                ],
+                "temperature": 0,
+                "max_tokens": 240,
+            }
+            response = httpx.post(
+                f"{settings.vision_url.rstrip('/')}/v1/chat/completions",
+                json=payload,
+                timeout=settings.vision_timeout_seconds,
+            )
+            response.raise_for_status()
+            data = response.json()
+            content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+            if isinstance(content, list):
+                content = " ".join(str(part.get("text", "")) for part in content if isinstance(part, dict))
+            return " ".join(str(content).split())[:3500]
+    except Exception:
+        return ""
+
+
+def _extract_video_frames(path: Path, directory: Path, max_frames: int) -> list[Path]:
+    pattern = str(directory / "frame-%02d.jpg")
+    try:
+        subprocess.run(
+            [
+                "ffmpeg", "-loglevel", "error", "-i", str(path),
+                "-vf", "fps=1/12,scale=1280:-2:force_original_aspect_ratio=decrease",
+                "-frames:v", str(max_frames), "-q:v", "3", pattern,
+            ],
+            capture_output=True,
+            timeout=180,
+            check=False,
+        )
+    except Exception:
+        return []
+    return sorted(directory.glob("frame-*.jpg"))[:max_frames]
+
+
+def _video_transcript(path: Path, work: Path) -> str:
     if not settings.whisper_enabled:
         return ""
     cli = Path(settings.whisper_cli_path)
     model = Path(settings.whisper_model_path)
     if not cli.is_file() or not model.is_file():
         return ""
-
-    tmp_root = Path(settings.data_dir, "tmp")
-    tmp_root.mkdir(parents=True, exist_ok=True)
     try:
-        with tempfile.TemporaryDirectory(dir=tmp_root) as directory:
-            work = Path(directory)
-            audio = work / "audio.wav"
-            output = work / "transcript"
-            extracted = subprocess.run(
-                [
-                    "ffmpeg", "-y", "-loglevel", "error", "-i", str(path),
-                    "-t", str(settings.video_transcribe_max_seconds),
-                    "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", str(audio),
-                ],
-                capture_output=True,
-                timeout=180,
-                check=False,
-            )
-            if extracted.returncode != 0 or not audio.is_file() or audio.stat().st_size == 0:
-                return ""
-
-            transcribed = subprocess.run(
-                [
-                    str(cli), "-m", str(model), "-f", str(audio),
-                    "-otxt", "-of", str(output), "-np",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=300,
-                check=False,
-            )
-            transcript_file = Path(f"{output}.txt")
-            if transcript_file.is_file():
-                return " ".join(transcript_file.read_text(encoding="utf-8", errors="ignore").split())[:6000]
-            return " ".join(transcribed.stdout.split())[:6000] if transcribed.returncode == 0 else ""
+        audio = work / "audio.wav"
+        output = work / "transcript"
+        extracted = subprocess.run(
+            [
+                "ffmpeg", "-y", "-loglevel", "error", "-i", str(path),
+                "-t", str(settings.video_transcribe_max_seconds),
+                "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", str(audio),
+            ],
+            capture_output=True,
+            timeout=180,
+            check=False,
+        )
+        if extracted.returncode != 0 or not audio.is_file() or audio.stat().st_size == 0:
+            return ""
+        transcribed = subprocess.run(
+            [str(cli), "-m", str(model), "-f", str(audio), "-otxt", "-of", str(output), "-np"],
+            capture_output=True,
+            text=True,
+            timeout=300,
+            check=False,
+        )
+        transcript_file = Path(f"{output}.txt")
+        if transcript_file.is_file():
+            return " ".join(transcript_file.read_text(encoding="utf-8", errors="ignore").split())[:6000]
+        return " ".join(transcribed.stdout.split())[:6000] if transcribed.returncode == 0 else ""
     except Exception:
         return ""
 
 
-def _analyse(path: Path, input_type: str, max_frames: int) -> dict[str, str]:
+def _empty_features() -> dict:
+    return {"ocr": "", "transcript": "", "vision": "", "hashes": []}
+
+
+def media_features(input_url: str | None, input_type: str, max_frames: int) -> dict:
+    path = _safe_local_path(input_url)
+    if path is None:
+        return _empty_features()
+
     cache_path = _analysis_cache_path(path)
     if cache_path.is_file():
         try:
@@ -175,20 +234,50 @@ def _analyse(path: Path, input_type: str, max_frames: int) -> dict[str, str]:
                 return {
                     "ocr": str(cached.get("ocr") or ""),
                     "transcript": str(cached.get("transcript") or ""),
+                    "vision": str(cached.get("vision") or ""),
+                    "hashes": [str(x) for x in cached.get("hashes", []) if x],
                 }
         except Exception:
             pass
 
+    result = _empty_features()
     suffix = path.suffix.casefold()
-    ocr_text = ""
-    transcript = ""
-    if input_type == "image" or suffix in IMAGE_EXTS:
-        ocr_text = _ocr(path)
-    elif input_type == "video" or suffix in VIDEO_EXTS:
-        ocr_text = _video_ocr(path, max_frames=max_frames)
-        transcript = _video_transcript(path)
+    tmp_root = Path(settings.data_dir, "tmp")
+    tmp_root.mkdir(parents=True, exist_ok=True)
 
-    result = {"ocr": ocr_text, "transcript": transcript}
+    if input_type == "image" or suffix in IMAGE_EXTS:
+        result["ocr"] = _ocr(path)
+        result["vision"] = _vision_describe(path)
+        fingerprint = _phash(path)
+        if fingerprint:
+            result["hashes"] = [fingerprint]
+    elif input_type == "video" or suffix in VIDEO_EXTS:
+        try:
+            with tempfile.TemporaryDirectory(dir=tmp_root) as directory:
+                work = Path(directory)
+                frames = _extract_video_frames(path, work, max_frames=max_frames)
+                ocr_chunks: list[str] = []
+                vision_chunks: list[str] = []
+                hashes: list[str] = []
+                visual_frames = frames[: settings.vision_max_frames]
+                for frame in frames:
+                    text = _ocr(frame)
+                    if text and text not in ocr_chunks:
+                        ocr_chunks.append(text)
+                    fingerprint = _phash(frame)
+                    if fingerprint and fingerprint not in hashes:
+                        hashes.append(fingerprint)
+                for frame in visual_frames:
+                    description = _vision_describe(frame)
+                    if description and description not in vision_chunks:
+                        vision_chunks.append(description)
+                result["ocr"] = " ".join(ocr_chunks)[:5000]
+                result["vision"] = " | ".join(vision_chunks)[:6500]
+                result["hashes"] = hashes[:max_frames]
+                result["transcript"] = _video_transcript(path, work)
+        except Exception:
+            pass
+
     try:
         cache_path.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
     except OSError:
@@ -197,14 +286,14 @@ def _analyse(path: Path, input_type: str, max_frames: int) -> dict[str, str]:
 
 
 def enrich_query(base_query: str, input_url: str | None, input_type: str, max_frames: int) -> str:
-    path = _safe_local_path(input_url)
-    if path is None:
-        return base_query.strip()
-
-    analysis = _analyse(path, input_type=input_type, max_frames=max_frames)
+    features = media_features(input_url, input_type=input_type, max_frames=max_frames)
     parts = [
         part.strip()
-        for part in (base_query, analysis.get("ocr", ""), analysis.get("transcript", ""))
+        for part in (base_query, features["ocr"], features["transcript"], features["vision"])
         if part and part.strip()
     ]
-    return " ".join(parts)[:9000]
+    return " ".join(parts)[:12000]
+
+
+def visual_hashes(input_url: str | None, input_type: str, max_frames: int) -> list[str]:
+    return list(media_features(input_url, input_type=input_type, max_frames=max_frames).get("hashes", []))

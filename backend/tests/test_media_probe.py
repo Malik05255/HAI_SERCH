@@ -129,3 +129,41 @@ def test_frame_dedupe_removes_near_identical_images(tmp_path) -> None:
     assert first in selected
     assert duplicate not in selected
     assert distinct in selected
+
+
+def test_media_cache_rejects_stale_versions(tmp_path, monkeypatch) -> None:
+    cache = tmp_path / "old.json"
+    cache.write_text(
+        json.dumps({
+            "version": media.MEDIA_CACHE_VERSION - 1,
+            "ocr": "text",
+            "transcript": "speech",
+            "vision": "scene",
+            "hashes": ["abc"],
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(media.settings, "vision_enabled", True)
+
+    assert media._cached_features(cache) is None
+
+
+def test_media_cache_accepts_current_version(tmp_path, monkeypatch) -> None:
+    cache = tmp_path / "current.json"
+    cache.write_text(
+        json.dumps({
+            "version": media.MEDIA_CACHE_VERSION,
+            "ocr": "text",
+            "transcript": "speech",
+            "vision": "scene",
+            "hashes": ["abc"],
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(media.settings, "vision_enabled", True)
+
+    cached = media._cached_features(cache)
+
+    assert cached is not None
+    assert cached["vision"] == "scene"
+    assert cached["hashes"] == ["abc"]

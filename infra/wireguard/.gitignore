@@ -1,0 +1,8 @@
+# Never commit WireGuard client configs/private keys.
+wg_confs/*.conf
+peer*/
+*.key
+*.png
+
+# Keep the directory itself available for deployment.
+!wg_confs/.gitkeep

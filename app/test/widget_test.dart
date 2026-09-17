@@ -60,4 +60,10 @@ void main() {
       'المشهد والحوار يدعمان النتيجة',
     );
   });
+
+  test('verified_page only reports real source-page verification', () {
+    expect(_result({'verified_page': true}).pageVerified, isTrue);
+    expect(_result({'verified_page': false}).pageVerified, isFalse);
+    expect(_result({}).pageVerified, isFalse);
+  });
 }

@@ -23,6 +23,11 @@ class Settings(BaseSettings):
     search_max_attempts: int = 48
     search_continue_attempt_floor: int = 8
 
+    planner_enabled: bool = True
+    planner_url: str = "http://planner:8082"
+    planner_timeout_seconds: int = 75
+    planner_max_queries: int = 6
+
     video_max_upload_mb: int = 250
     video_max_keyframes: int = 12
     video_transcribe_max_seconds: int = 300

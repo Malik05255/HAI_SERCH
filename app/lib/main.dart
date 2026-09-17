@@ -14,12 +14,14 @@ void main() => runApp(const DeepSearchApp());
 
 class DeepSearchApp extends StatefulWidget {
   const DeepSearchApp({super.key});
+
   @override
   State<DeepSearchApp> createState() => _DeepSearchAppState();
 }
 
 class _DeepSearchAppState extends State<DeepSearchApp> {
   ThemeMode mode = ThemeMode.light;
+
   @override
   Widget build(BuildContext context) {
     const seed = Color(0xFF2458D8);
@@ -33,7 +35,10 @@ class _DeepSearchAppState extends State<DeepSearchApp> {
         scaffoldBackgroundColor: const Color(0xFFF7F8FA),
         cardTheme: const CardThemeData(elevation: 0, margin: EdgeInsets.zero),
       ),
-      darkTheme: ThemeData(colorScheme: ColorScheme.fromSeed(seedColor: seed, brightness: Brightness.dark), useMaterial3: true),
+      darkTheme: ThemeData(
+        colorScheme: ColorScheme.fromSeed(seedColor: seed, brightness: Brightness.dark),
+        useMaterial3: true,
+      ),
       builder: (context, child) => Directionality(textDirection: TextDirection.rtl, child: child!),
       home: HomeShell(
         dark: mode == ThemeMode.dark,
@@ -47,25 +52,44 @@ class HomeShell extends StatefulWidget {
   const HomeShell({super.key, required this.dark, required this.onThemeChanged});
   final bool dark;
   final ValueChanged<bool> onThemeChanged;
+
   @override
   State<HomeShell> createState() => _HomeShellState();
 }
 
 class _HomeShellState extends State<HomeShell> {
-  final api = const ApiClient();
+  final api = ApiClient();
   final archive = LocalArchiveStore();
   int index = 0;
   int archiveRevision = 0;
+  int accountRevision = 0;
 
   void archiveChanged() => setState(() => archiveRevision++);
+  void accountChanged() => setState(() => accountRevision++);
 
   @override
   Widget build(BuildContext context) {
     final pages = [
-      SearchPage(api: api, archive: archive, onArchiveChanged: archiveChanged, onOpenQueue: () => setState(() => index = 1)),
-      QueuePage(api: api, archive: archive, onArchiveChanged: archiveChanged),
+      SearchPage(
+        key: ValueKey('search-$accountRevision'),
+        api: api,
+        archive: archive,
+        onArchiveChanged: archiveChanged,
+        onOpenQueue: () => setState(() => index = 1),
+      ),
+      QueuePage(
+        key: ValueKey('queue-$accountRevision'),
+        api: api,
+        archive: archive,
+        onArchiveChanged: archiveChanged,
+      ),
       ArchivePage(key: ValueKey(archiveRevision), archive: archive, onArchiveChanged: archiveChanged),
-      SettingsPage(api: api, dark: widget.dark, onThemeChanged: widget.onThemeChanged),
+      SettingsPage(
+        api: api,
+        dark: widget.dark,
+        onThemeChanged: widget.onThemeChanged,
+        onAccountChanged: accountChanged,
+      ),
     ];
     return Scaffold(
       appBar: AppBar(
@@ -97,11 +121,18 @@ class _HomeShellState extends State<HomeShell> {
 }
 
 class SearchPage extends StatefulWidget {
-  const SearchPage({super.key, required this.api, required this.archive, required this.onArchiveChanged, required this.onOpenQueue});
+  const SearchPage({
+    super.key,
+    required this.api,
+    required this.archive,
+    required this.onArchiveChanged,
+    required this.onOpenQueue,
+  });
   final ApiClient api;
   final LocalArchiveStore archive;
   final VoidCallback onArchiveChanged;
   final VoidCallback onOpenQueue;
+
   @override
   State<SearchPage> createState() => _SearchPageState();
 }
@@ -116,16 +147,27 @@ class _SearchPageState extends State<SearchPage> {
   List<SearchJob> recent = const [];
 
   @override
-  void initState() { super.initState(); refresh(); }
+  void initState() {
+    super.initState();
+    refresh();
+  }
+
   @override
-  void dispose() { controller.dispose(); super.dispose(); }
+  void dispose() {
+    controller.dispose();
+    super.dispose();
+  }
 
   Future<void> refresh() async {
     try {
       final hidden = await widget.archive.archivedIds();
       final data = await widget.api.listJobs(view: 'history');
       if (mounted) setState(() => recent = data.where((j) => !hidden.contains(j.id)).take(5).toList());
-    } catch (_) {} finally { if (mounted) setState(() => loading = false); }
+    } catch (_) {
+      // Search remains available when history cannot be loaded.
+    } finally {
+      if (mounted) setState(() => loading = false);
+    }
   }
 
   Future<void> pickFile() async {
@@ -133,7 +175,10 @@ class _SearchPageState extends State<SearchPage> {
     final result = await FilePicker.platform.pickFiles(type: type, allowMultiple: false);
     final file = result?.files.single;
     if (file?.path == null) return;
-    setState(() { filePath = file!.path; fileName = file.name; });
+    setState(() {
+      filePath = file!.path;
+      fileName = file.name;
+    });
   }
 
   Future<void> submit() async {
@@ -142,28 +187,36 @@ class _SearchPageState extends State<SearchPage> {
     if (mode != 'text' && filePath == null) return _message('اختر ملفًا');
     setState(() => busy = true);
     try {
-      String? inputUrl;
+      String? uploadId;
       var inputType = mode;
       if (filePath != null && mode != 'text') {
         final upload = await widget.api.upload(filePath!);
-        inputUrl = (upload['upload_id'] ?? upload['input_url']) as String?;
+        uploadId = upload['upload_id'] as String?;
         inputType = (upload['input_type'] as String?) ?? mode;
       }
-      final job = await widget.api.createJob(query: query, inputType: inputType, inputUrl: inputUrl);
+      final job = await widget.api.createJob(query: query, inputType: inputType, uploadId: uploadId);
       if (filePath != null && mode != 'text') {
         await widget.archive.rememberSource(job.id, filePath!, fileName ?? 'media');
       }
       controller.clear();
-      setState(() { filePath = null; fileName = null; mode = 'text'; });
+      setState(() {
+        filePath = null;
+        fileName = null;
+        mode = 'text';
+      });
       final position = job.queuePosition ?? 1;
       _message(position == 1 ? 'بدأ البحث' : 'أضيف للدور $position');
       widget.onOpenQueue();
     } catch (error) {
       _message(error.toString().contains('429') ? 'الطابور ممتلئ 5/5' : 'لم يبدأ البحث');
-    } finally { if (mounted) setState(() => busy = false); }
+    } finally {
+      if (mounted) setState(() => busy = false);
+    }
   }
 
-  void _message(String text) { if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text))); }
+  void _message(String text) {
+    if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -179,7 +232,11 @@ class _SearchPageState extends State<SearchPage> {
               ButtonSegment(value: 'video', label: Text('فيديو'), icon: Icon(Icons.play_circle_outline_rounded)),
             ],
             selected: {mode},
-            onSelectionChanged: (value) => setState(() { mode = value.first; filePath = null; fileName = null; }),
+            onSelectionChanged: (value) => setState(() {
+              mode = value.first;
+              filePath = null;
+              fileName = null;
+            }),
           ),
           const SizedBox(height: 12),
           TextField(
@@ -197,13 +254,18 @@ class _SearchPageState extends State<SearchPage> {
             InputChip(
               avatar: Icon(mode == 'video' ? Icons.play_circle_outline : Icons.image_outlined),
               label: Text(fileName!, overflow: TextOverflow.ellipsis),
-              onDeleted: () => setState(() { fileName = null; filePath = null; }),
+              onDeleted: () => setState(() {
+                fileName = null;
+                filePath = null;
+              }),
             ),
           ],
           const SizedBox(height: 10),
           FilledButton.icon(
             onPressed: busy ? null : submit,
-            icon: busy ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.manage_search_rounded),
+            icon: busy
+                ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
+                : const Icon(Icons.manage_search_rounded),
             label: const Padding(padding: EdgeInsets.symmetric(vertical: 13), child: Text('ابدأ البحث')),
           ),
           const SizedBox(height: 26),
@@ -211,9 +273,15 @@ class _SearchPageState extends State<SearchPage> {
             const Text('آخر النتائج', style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700)),
             const SizedBox(height: 10),
             ...recent.map((job) => Padding(
-              padding: const EdgeInsets.only(bottom: 10),
-              child: JobCard(job: job, api: widget.api, archive: widget.archive, onArchiveChanged: widget.onArchiveChanged, onChanged: refresh),
-            )),
+                  padding: const EdgeInsets.only(bottom: 10),
+                  child: JobCard(
+                    job: job,
+                    api: widget.api,
+                    archive: widget.archive,
+                    onArchiveChanged: widget.onArchiveChanged,
+                    onChanged: refresh,
+                  ),
+                )),
           ],
         ],
       ),
@@ -226,6 +294,7 @@ class QueuePage extends StatefulWidget {
   final ApiClient api;
   final LocalArchiveStore archive;
   final VoidCallback onArchiveChanged;
+
   @override
   State<QueuePage> createState() => _QueuePageState();
 }
@@ -234,10 +303,19 @@ class _QueuePageState extends State<QueuePage> {
   List<SearchJob> jobs = const [];
   bool loading = true;
   Timer? timer;
+
   @override
-  void initState() { super.initState(); refresh(); timer = Timer.periodic(const Duration(seconds: 8), (_) => refresh(silent: true)); }
+  void initState() {
+    super.initState();
+    refresh();
+    timer = Timer.periodic(const Duration(seconds: 8), (_) => refresh(silent: true));
+  }
+
   @override
-  void dispose() { timer?.cancel(); super.dispose(); }
+  void dispose() {
+    timer?.cancel();
+    super.dispose();
+  }
 
   Future<void> refresh({bool silent = false}) async {
     if (!silent && mounted) setState(() => loading = true);
@@ -245,7 +323,9 @@ class _QueuePageState extends State<QueuePage> {
       final hidden = await widget.archive.archivedIds();
       final data = await widget.api.listJobs(view: 'queue');
       if (mounted) setState(() => jobs = data.where((j) => !hidden.contains(j.id)).toList());
-    } finally { if (!silent && mounted) setState(() => loading = false); }
+    } finally {
+      if (!silent && mounted) setState(() => loading = false);
+    }
   }
 
   @override
@@ -264,12 +344,22 @@ class _QueuePageState extends State<QueuePage> {
             ),
           ]),
           const SizedBox(height: 14),
-          if (loading) const Center(child: Padding(padding: EdgeInsets.all(30), child: CircularProgressIndicator()))
-          else if (jobs.isEmpty) const _EmptyState(icon: Icons.inbox_outlined, text: 'الطابور فارغ')
-          else ...jobs.map((job) => Padding(
-            padding: const EdgeInsets.only(bottom: 10),
-            child: JobCard(job: job, api: widget.api, archive: widget.archive, onArchiveChanged: widget.onArchiveChanged, onChanged: refresh, queueMode: true),
-          )),
+          if (loading)
+            const Center(child: Padding(padding: EdgeInsets.all(30), child: CircularProgressIndicator()))
+          else if (jobs.isEmpty)
+            const _EmptyState(icon: Icons.inbox_outlined, text: 'الطابور فارغ')
+          else
+            ...jobs.map((job) => Padding(
+                  padding: const EdgeInsets.only(bottom: 10),
+                  child: JobCard(
+                    job: job,
+                    api: widget.api,
+                    archive: widget.archive,
+                    onArchiveChanged: widget.onArchiveChanged,
+                    onChanged: refresh,
+                    queueMode: true,
+                  ),
+                )),
         ],
       ),
     );
@@ -280,6 +370,7 @@ class ArchivePage extends StatefulWidget {
   const ArchivePage({super.key, required this.archive, required this.onArchiveChanged});
   final LocalArchiveStore archive;
   final VoidCallback onArchiveChanged;
+
   @override
   State<ArchivePage> createState() => _ArchivePageState();
 }
@@ -287,11 +378,19 @@ class ArchivePage extends StatefulWidget {
 class _ArchivePageState extends State<ArchivePage> {
   List<LocalArchiveItem> items = const [];
   bool loading = true;
+
   @override
-  void initState() { super.initState(); refresh(); }
+  void initState() {
+    super.initState();
+    refresh();
+  }
+
   Future<void> refresh() async {
     final data = await widget.archive.listArchives();
-    if (mounted) setState(() { items = data; loading = false; });
+    if (mounted) setState(() {
+      items = data;
+      loading = false;
+    });
   }
 
   @override
@@ -300,51 +399,56 @@ class _ArchivePageState extends State<ArchivePage> {
     return RefreshIndicator(
       onRefresh: refresh,
       child: items.isEmpty
-        ? const ListView(children: [SizedBox(height: 90), _EmptyState(icon: Icons.archive_outlined, text: 'الأرشيف فارغ')])
-        : ListView.separated(
-            padding: const EdgeInsets.all(16),
-            itemCount: items.length,
-            separatorBuilder: (_, __) => const SizedBox(height: 10),
-            itemBuilder: (_, index) {
-              final item = items[index];
-              return Card(
-                child: ListTile(
-                  contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-                  leading: Icon(item.inputType == 'video' ? Icons.video_file_outlined : item.inputType == 'image' ? Icons.image_outlined : Icons.search_rounded),
-                  title: Text(item.title, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.w700)),
-                  subtitle: Text(item.hasMedia ? '${item.foundCount}/${item.targetResults} · المرفق محفوظ' : '${item.foundCount}/${item.targetResults}'),
-                  onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => LocalArchiveResultsPage(item: item))),
-                  trailing: PopupMenuButton<String>(
-                    onSelected: (value) async {
-                      if (value == 'restore') {
-                        await widget.archive.restoreArchive(item.jobId);
-                      } else if (value == 'delete') {
-                        final ok = await showDialog<bool>(
-                          context: context,
-                          builder: (_) => AlertDialog(
-                            title: const Text('حذف الأرشيف'),
-                            content: const Text('سيتم حذف النسخة المحلية والمرفق المحفوظ من هذا الجهاز فقط.'),
-                            actions: [
-                              TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('رجوع')),
-                              FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('حذف')),
-                            ],
-                          ),
-                        ) ?? false;
-                        if (!ok) return;
-                        await widget.archive.deleteArchive(item.jobId);
-                      }
-                      widget.onArchiveChanged();
-                      await refresh();
-                    },
-                    itemBuilder: (_) => const [
-                      PopupMenuItem(value: 'restore', child: Text('استرجاع')),
-                      PopupMenuItem(value: 'delete', child: Text('حذف من الجهاز')),
-                    ],
+          ? ListView(children: const [SizedBox(height: 90), _EmptyState(icon: Icons.archive_outlined, text: 'الأرشيف فارغ')])
+          : ListView.separated(
+              padding: const EdgeInsets.all(16),
+              itemCount: items.length,
+              separatorBuilder: (_, __) => const SizedBox(height: 10),
+              itemBuilder: (_, index) {
+                final item = items[index];
+                return Card(
+                  child: ListTile(
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                    leading: Icon(item.inputType == 'video'
+                        ? Icons.video_file_outlined
+                        : item.inputType == 'image'
+                            ? Icons.image_outlined
+                            : Icons.search_rounded),
+                    title: Text(item.title, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.w700)),
+                    subtitle: Text(item.hasMedia ? '${item.foundCount}/${item.targetResults} · المرفق محفوظ' : '${item.foundCount}/${item.targetResults}'),
+                    onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => LocalArchiveResultsPage(item: item))),
+                    trailing: PopupMenuButton<String>(
+                      onSelected: (value) async {
+                        if (value == 'restore') {
+                          await widget.archive.restoreArchive(item.jobId);
+                        } else if (value == 'delete') {
+                          final ok = await showDialog<bool>(
+                                context: context,
+                                builder: (_) => AlertDialog(
+                                  title: const Text('حذف الأرشيف'),
+                                  content: const Text('سيتم حذف النسخة المحلية والمرفق المحفوظ من هذا الجهاز فقط.'),
+                                  actions: [
+                                    TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('رجوع')),
+                                    FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('حذف')),
+                                  ],
+                                ),
+                              ) ??
+                              false;
+                          if (!ok) return;
+                          await widget.archive.deleteArchive(item.jobId);
+                        }
+                        widget.onArchiveChanged();
+                        await refresh();
+                      },
+                      itemBuilder: (_) => const [
+                        PopupMenuItem(value: 'restore', child: Text('استرجاع')),
+                        PopupMenuItem(value: 'delete', child: Text('حذف من الجهاز')),
+                      ],
+                    ),
                   ),
-                ),
-              );
-            },
-          ),
+                );
+              },
+            ),
     );
   }
 }
@@ -352,6 +456,7 @@ class _ArchivePageState extends State<ArchivePage> {
 class LocalArchiveResultsPage extends StatelessWidget {
   const LocalArchiveResultsPage({super.key, required this.item});
   final LocalArchiveItem item;
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -367,11 +472,13 @@ class LocalArchiveResultsPage extends StatelessWidget {
             ),
             const SizedBox(height: 14),
           ],
-          if (item.results.isEmpty) const _EmptyState(icon: Icons.search_off_rounded, text: 'لا توجد نتائج محفوظة')
-          else ...item.results.map((result) => Padding(
-            padding: const EdgeInsets.only(bottom: 12),
-            child: ResultCard(item: result),
-          )),
+          if (item.results.isEmpty)
+            const _EmptyState(icon: Icons.search_off_rounded, text: 'لا توجد نتائج محفوظة')
+          else
+            ...item.results.map((result) => Padding(
+                  padding: const EdgeInsets.only(bottom: 12),
+                  child: ResultCard(item: result),
+                )),
         ],
       ),
     );
@@ -382,17 +489,18 @@ class _EmptyState extends StatelessWidget {
   const _EmptyState({required this.icon, required this.text});
   final IconData icon;
   final String text;
+
   @override
   Widget build(BuildContext context) => Center(
-    child: Padding(
-      padding: const EdgeInsets.all(28),
-      child: Column(children: [
-        Icon(icon, size: 44, color: Theme.of(context).colorScheme.outline),
-        const SizedBox(height: 10),
-        Text(text, style: TextStyle(color: Theme.of(context).colorScheme.outline)),
-      ]),
-    ),
-  );
+        child: Padding(
+          padding: const EdgeInsets.all(28),
+          child: Column(children: [
+            Icon(icon, size: 44, color: Theme.of(context).colorScheme.outline),
+            const SizedBox(height: 10),
+            Text(text, style: TextStyle(color: Theme.of(context).colorScheme.outline)),
+          ]),
+        ),
+      );
 }
 
 class JobCard extends StatelessWidget {
@@ -413,22 +521,39 @@ class JobCard extends StatelessWidget {
   final bool queueMode;
 
   String get statusLabel => switch (job.status) {
-    'queued' => 'في الدور', 'running' => 'يبحث', 'completed' => 'مكتمل', 'partial' => 'جزئي',
-    'stopped' => 'متوقف', 'cancelled' => 'ملغي', 'needs_context' => 'غير كافٍ', 'failed' => 'تعذر', _ => job.status,
-  };
+        'queued' => 'في الدور',
+        'running' => 'يبحث',
+        'completed' => 'مكتمل',
+        'partial' => 'جزئي',
+        'stopped' => 'متوقف',
+        'cancelled' => 'ملغي',
+        'needs_context' => 'غير كافٍ',
+        'failed' => 'تعذر',
+        _ => job.status,
+      };
+
   String get queueLabel => job.status == 'running' ? 'يعمل الآن' : (job.queuePosition == null ? statusLabel : 'الدور ${job.queuePosition}');
 
-  Future<bool> _confirm(BuildContext context, String title, String message) async => await showDialog<bool>(
-    context: context,
-    builder: (_) => AlertDialog(
-      title: Text(title), content: Text(message),
-      actions: [TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('رجوع')), FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('تأكيد'))],
-    ),
-  ) ?? false;
+  Future<bool> _confirm(BuildContext context, String title, String message) async {
+    return await showDialog<bool>(
+          context: context,
+          builder: (_) => AlertDialog(
+            title: Text(title),
+            content: Text(message),
+            actions: [
+              TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('رجوع')),
+              FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('تأكيد')),
+            ],
+          ),
+        ) ??
+        false;
+  }
 
   Future<void> _archiveLocally(BuildContext context) async {
     if (job.inputType != 'text' && !await archive.hasPendingMedia(job.id)) {
-      if (context.mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('المرفق غير موجود على هذا الجهاز. أرشف المهمة من الجهاز الذي أرسل الملف.')));
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('المرفق غير موجود على هذا الجهاز. أرشف المهمة من الجهاز الذي أرسل الملف.')));
+      }
       return;
     }
     final results = await api.results(job.id);
@@ -447,15 +572,21 @@ class JobCard extends StatelessWidget {
   Future<void> _runAction(BuildContext context, String value) async {
     try {
       if (value == 'archive') {
-        if (job.isActive && !await _confirm(context, 'حفظ في الأرشيف', 'سيتم حفظ المهمة والمرفق على هذا الجهاز ثم إلغاء البحث الحالي.')) return;
+        if (job.isActive) {
+          final confirmed = await _confirm(context, 'حفظ في الأرشيف', 'سيتم حفظ المهمة والمرفق على هذا الجهاز ثم إلغاء البحث الحالي.');
+          if (!confirmed || !context.mounted) return;
+        }
         await _archiveLocally(context);
       } else if (value == 'delete') {
-        if (!await _confirm(context, 'حذف المهمة', 'سيتم حذف المهمة ونتائجها من السحابة.')) return;
+        final confirmed = await _confirm(context, 'حذف المهمة', 'سيتم حذف المهمة ونتائجها من السحابة.');
+        if (!confirmed) return;
+        if (job.status == 'running') await api.action(job.id, 'cancel');
         await archive.discardPending(job.id);
         await api.deleteJob(job.id);
         await onChanged();
       } else if (value == 'cancel') {
-        if (!await _confirm(context, 'إلغاء البحث', 'سيتم إيقاف البحث وحذف المرفق المؤقت من السيرفر وهذا الجهاز.')) return;
+        final confirmed = await _confirm(context, 'إلغاء البحث', 'سيتم إيقاف البحث وحذف المرفق المؤقت من السيرفر وهذا الجهاز.');
+        if (!confirmed) return;
         await api.action(job.id, 'cancel');
         await archive.discardPending(job.id);
         await onChanged();
@@ -479,7 +610,10 @@ class JobCard extends StatelessWidget {
           padding: const EdgeInsets.all(14),
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              if (queueMode && job.queuePosition != null) ...[CircleAvatar(radius: 18, child: Text('${job.queuePosition}')), const SizedBox(width: 10)],
+              if (queueMode && job.queuePosition != null) ...[
+                CircleAvatar(radius: 18, child: Text('${job.queuePosition}')),
+                const SizedBox(width: 10),
+              ],
               Expanded(child: Text(job.title, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.w700))),
               PopupMenuButton<String>(
                 onSelected: (value) => _runAction(context, value),
@@ -495,9 +629,13 @@ class JobCard extends StatelessWidget {
             const SizedBox(height: 8),
             Row(children: [
               Text(queueMode ? queueLabel : statusLabel, style: TextStyle(color: Theme.of(context).colorScheme.primary, fontWeight: FontWeight.w600)),
-              const Spacer(), Text('${job.foundCount}/${job.targetResults}', style: Theme.of(context).textTheme.bodySmall),
+              const Spacer(),
+              Text('${job.foundCount}/${job.targetResults}', style: Theme.of(context).textTheme.bodySmall),
             ]),
-            if (job.isActive) ...[const SizedBox(height: 9), LinearProgressIndicator(value: job.progress.clamp(0, 1))],
+            if (job.isActive) ...[
+              const SizedBox(height: 9),
+              LinearProgressIndicator(value: job.progress.clamp(0, 1)),
+            ],
           ]),
         ),
       ),
@@ -508,31 +646,40 @@ class JobCard extends StatelessWidget {
 class ResultCard extends StatelessWidget {
   const ResultCard({super.key, required this.item});
   final SearchResult item;
+
   @override
-  Widget build(BuildContext context) => Card(
-    child: Padding(
-      padding: const EdgeInsets.all(14),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Row(children: [
-          CircleAvatar(child: Text('${item.rank}')), const SizedBox(width: 10),
-          Expanded(child: Text(item.title, style: const TextStyle(fontWeight: FontWeight.w700))),
-          Text('${item.score.toStringAsFixed(0)}%'),
+  Widget build(BuildContext context) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            CircleAvatar(child: Text('${item.rank}')),
+            const SizedBox(width: 10),
+            Expanded(child: Text(item.title, style: const TextStyle(fontWeight: FontWeight.w700))),
+            Text('${item.score.toStringAsFixed(0)}%'),
+          ]),
+          if (item.summary.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            Text(item.summary, maxLines: 7, overflow: TextOverflow.ellipsis),
+          ],
+          const SizedBox(height: 8),
+          TextButton.icon(
+            onPressed: () => launchUrl(Uri.parse(item.url), mode: LaunchMode.externalApplication),
+            icon: const Icon(Icons.open_in_new_rounded),
+            label: const Text('المصدر'),
+          ),
         ]),
-        if (item.summary.isNotEmpty) ...[const SizedBox(height: 10), Text(item.summary, maxLines: 7, overflow: TextOverflow.ellipsis)],
-        const SizedBox(height: 8),
-        TextButton.icon(
-          onPressed: () => launchUrl(Uri.parse(item.url), mode: LaunchMode.externalApplication),
-          icon: const Icon(Icons.open_in_new_rounded), label: const Text('المصدر'),
-        ),
-      ]),
-    ),
-  );
+      ),
+    );
+  }
 }
 
 class ResultsPage extends StatefulWidget {
   const ResultsPage({super.key, required this.api, required this.job});
   final ApiClient api;
   final SearchJob job;
+
   @override
   State<ResultsPage> createState() => _ResultsPageState();
 }
@@ -540,32 +687,56 @@ class ResultsPage extends StatefulWidget {
 class _ResultsPageState extends State<ResultsPage> {
   List<SearchResult> results = const [];
   bool loading = true;
+
   @override
-  void initState() { super.initState(); load(); }
-  Future<void> load() async {
-    try { final data = await widget.api.results(widget.job.id); if (mounted) setState(() => results = data); }
-    finally { if (mounted) setState(() => loading = false); }
+  void initState() {
+    super.initState();
+    load();
   }
+
+  Future<void> load() async {
+    try {
+      final data = await widget.api.results(widget.job.id);
+      if (mounted) setState(() => results = data);
+    } finally {
+      if (mounted) setState(() => loading = false);
+    }
+  }
+
   @override
-  Widget build(BuildContext context) => Scaffold(
-    appBar: AppBar(title: Text(widget.job.title, maxLines: 1, overflow: TextOverflow.ellipsis)),
-    body: loading ? const Center(child: CircularProgressIndicator()) : RefreshIndicator(
-      onRefresh: load,
-      child: results.isEmpty
-        ? const ListView(children: [SizedBox(height: 90), _EmptyState(icon: Icons.search_off_rounded, text: 'لا توجد نتائج بعد')])
-        : ListView.separated(
-            padding: const EdgeInsets.all(16), itemCount: results.length,
-            separatorBuilder: (_, __) => const SizedBox(height: 12), itemBuilder: (_, i) => ResultCard(item: results[i]),
-          ),
-    ),
-  );
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: Text(widget.job.title, maxLines: 1, overflow: TextOverflow.ellipsis)),
+      body: loading
+          ? const Center(child: CircularProgressIndicator())
+          : RefreshIndicator(
+              onRefresh: load,
+              child: results.isEmpty
+                  ? ListView(children: const [SizedBox(height: 90), _EmptyState(icon: Icons.search_off_rounded, text: 'لا توجد نتائج بعد')])
+                  : ListView.separated(
+                      padding: const EdgeInsets.all(16),
+                      itemCount: results.length,
+                      separatorBuilder: (_, __) => const SizedBox(height: 12),
+                      itemBuilder: (_, i) => ResultCard(item: results[i]),
+                    ),
+            ),
+    );
+  }
 }
 
 class SettingsPage extends StatefulWidget {
-  const SettingsPage({super.key, required this.api, required this.dark, required this.onThemeChanged});
+  const SettingsPage({
+    super.key,
+    required this.api,
+    required this.dark,
+    required this.onThemeChanged,
+    required this.onAccountChanged,
+  });
   final ApiClient api;
   final bool dark;
   final ValueChanged<bool> onThemeChanged;
+  final VoidCallback onAccountChanged;
+
   @override
   State<SettingsPage> createState() => _SettingsPageState();
 }
@@ -573,42 +744,175 @@ class SettingsPage extends StatefulWidget {
 class _SettingsPageState extends State<SettingsPage> {
   bool? connected;
   bool checkingUpdate = false;
+
   @override
-  void initState() { super.initState(); checkServer(); }
-  Future<void> checkServer() async { final ok = await widget.api.health(); if (mounted) setState(() => connected = ok); }
+  void initState() {
+    super.initState();
+    checkServer();
+  }
+
+  Future<void> checkServer() async {
+    final ok = await widget.api.health();
+    if (mounted) setState(() => connected = ok);
+  }
+
+  Future<void> showPairCode() async {
+    try {
+      final data = await widget.api.createPairCode();
+      if (!mounted) return;
+      final code = data['code'] as String? ?? '';
+      await showDialog<void>(
+        context: context,
+        builder: (_) => AlertDialog(
+          title: const Text('رمز الربط'),
+          content: SelectableText(code, textAlign: TextAlign.center, style: const TextStyle(fontSize: 28, fontWeight: FontWeight.w800, letterSpacing: 3)),
+          actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text('إغلاق'))],
+        ),
+      );
+    } catch (_) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('تعذر إنشاء رمز الربط')));
+    }
+  }
+
+  Future<void> enterPairCode() async {
+    final controller = TextEditingController();
+    final code = await showDialog<String>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('ربط هذا الجهاز'),
+        content: TextField(controller: controller, autofocus: true, textCapitalization: TextCapitalization.characters, decoration: const InputDecoration(hintText: 'رمز الربط')),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('إلغاء')),
+          FilledButton(onPressed: () => Navigator.pop(context, controller.text.trim()), child: const Text('ربط')),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (code == null || code.isEmpty) return;
+    try {
+      await widget.api.pair(code);
+      if (!mounted) return;
+      widget.onAccountChanged();
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('تم ربط الجهاز')));
+    } catch (_) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('رمز غير صالح أو منتهي')));
+    }
+  }
+
+  Future<void> showDevices() async {
+    try {
+      final devices = await widget.api.devices();
+      if (!mounted) return;
+      await showModalBottomSheet<void>(
+        context: context,
+        showDragHandle: true,
+        builder: (sheetContext) => SafeArea(
+          child: ListView(
+            shrinkWrap: true,
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 20),
+            children: [
+              const ListTile(title: Text('الأجهزة المرتبطة', style: TextStyle(fontWeight: FontWeight.w700))),
+              ...devices.map((device) {
+                final current = device['current'] == true;
+                return ListTile(
+                  leading: Icon((device['name'] as String?) == 'Windows' ? Icons.computer_rounded : Icons.smartphone_rounded),
+                  title: Text((device['name'] as String?) ?? 'جهاز'),
+                  subtitle: current ? const Text('هذا الجهاز') : null,
+                  trailing: current
+                      ? null
+                      : IconButton(
+                          icon: const Icon(Icons.link_off_rounded),
+                          onPressed: () async {
+                            await widget.api.revokeDevice(device['id'] as String);
+                            if (sheetContext.mounted) Navigator.pop(sheetContext);
+                          },
+                        ),
+                );
+              }),
+            ],
+          ),
+        ),
+      );
+    } catch (_) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('تعذر تحميل الأجهزة')));
+    }
+  }
+
   Future<void> checkUpdate() async {
     setState(() => checkingUpdate = true);
     final update = await UpdateService().check();
     if (!mounted) return;
     setState(() => checkingUpdate = false);
-    if (update == null) { ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('أنت على آخر إصدار'))); return; }
+    if (update == null) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('أنت على آخر إصدار')));
+      return;
+    }
     final install = await showDialog<bool>(
       context: context,
       builder: (_) => AlertDialog(
-        title: const Text('تحديث متوفر'), content: Text('الإصدار ${update.version}'),
-        actions: [TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('لاحقًا')), FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('تحديث'))],
+        title: const Text('تحديث متوفر'),
+        content: Text('الإصدار ${update.version}'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('لاحقًا')),
+          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('تحديث')),
+        ],
       ),
     );
     if (install == true) {
-      try { await UpdateService().install(update); }
-      catch (_) { if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('تعذر تثبيت التحديث'))); }
+      try {
+        await UpdateService().install(update);
+      } catch (_) {
+        if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('تعذر تثبيت التحديث')));
+      }
     }
   }
+
   @override
-  Widget build(BuildContext context) => ListView(
-    padding: const EdgeInsets.all(16),
-    children: [
-      SwitchListTile(value: widget.dark, onChanged: widget.onThemeChanged, title: const Text('الوضع الداكن'), secondary: const Icon(Icons.dark_mode_outlined)),
-      ListTile(
-        leading: Icon(connected == true ? Icons.cloud_done_outlined : Icons.cloud_off_outlined),
-        title: const Text('السيرفر'), trailing: Text(connected == null ? '...' : connected! ? 'متصل' : 'غير متصل'), onTap: checkServer,
-      ),
-      const ListTile(leading: Icon(Icons.archive_outlined), title: Text('الأرشيف'), subtitle: Text('محلي على هذا الجهاز فقط')),
-      ListTile(
-        leading: const Icon(Icons.system_update_alt_rounded), title: const Text('التحديثات'),
-        trailing: checkingUpdate ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.chevron_left_rounded),
-        onTap: checkingUpdate ? null : checkUpdate,
-      ),
-    ],
-  );
+  Widget build(BuildContext context) {
+    return ListView(
+      padding: const EdgeInsets.all(16),
+      children: [
+        SwitchListTile(
+          value: widget.dark,
+          onChanged: widget.onThemeChanged,
+          title: const Text('الوضع الداكن'),
+          secondary: const Icon(Icons.dark_mode_outlined),
+        ),
+        ListTile(
+          leading: Icon(connected == true ? Icons.cloud_done_outlined : Icons.cloud_off_outlined),
+          title: const Text('السيرفر'),
+          trailing: Text(connected == null ? '...' : connected! ? 'متصل' : 'غير متصل'),
+          onTap: checkServer,
+        ),
+        ListTile(
+          leading: const Icon(Icons.qr_code_2_rounded),
+          title: const Text('رمز ربط جهاز'),
+          onTap: showPairCode,
+        ),
+        ListTile(
+          leading: const Icon(Icons.add_link_rounded),
+          title: const Text('إدخال رمز ربط'),
+          onTap: enterPairCode,
+        ),
+        ListTile(
+          leading: const Icon(Icons.devices_rounded),
+          title: const Text('الأجهزة المرتبطة'),
+          onTap: showDevices,
+        ),
+        const ListTile(
+          leading: Icon(Icons.archive_outlined),
+          title: Text('الأرشيف'),
+          subtitle: Text('محلي على هذا الجهاز فقط'),
+        ),
+        ListTile(
+          leading: const Icon(Icons.system_update_alt_rounded),
+          title: const Text('التحديثات'),
+          trailing: checkingUpdate
+              ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
+              : const Icon(Icons.chevron_left_rounded),
+          onTap: checkingUpdate ? null : checkUpdate,
+        ),
+      ],
+    );
+  }
 }

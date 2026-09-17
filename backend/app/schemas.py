@@ -32,7 +32,6 @@ class JobOut(BaseModel):
     found_count: int
     attempts: int
     queue_position: int | None = None
-    archived: bool = False
     created_at: datetime
     updated_at: datetime
 

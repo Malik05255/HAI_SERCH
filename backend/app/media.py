@@ -9,6 +9,7 @@ from .config import settings
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
 VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v"}
 UPLOAD_ID_RE = re.compile(r"^[0-9a-f-]{36}(?:\.[a-z0-9]{1,8})?$")
+ACCOUNT_ID_RE = re.compile(r"^[0-9a-f-]{36}$")
 
 
 def _uploads_root() -> Path:
@@ -17,17 +18,26 @@ def _uploads_root() -> Path:
     return root.resolve()
 
 
-def resolve_upload_id(upload_id: str | None) -> Path | None:
-    """Resolve an opaque upload id to a file inside DATA_DIR/uploads only."""
+def account_upload_root(account_id: str) -> Path:
+    if not ACCOUNT_ID_RE.fullmatch(account_id.casefold()):
+        raise ValueError("invalid account id")
+    root = _uploads_root()
+    folder = (root / account_id).resolve()
+    folder.relative_to(root)
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
+
+
+def resolve_upload_id(upload_id: str | None, account_id: str) -> Path | None:
     if not upload_id or not UPLOAD_ID_RE.fullmatch(upload_id.casefold()):
         return None
-    root = _uploads_root()
-    path = (root / upload_id).resolve()
     try:
+        root = account_upload_root(account_id)
+        path = (root / upload_id).resolve()
         path.relative_to(root)
-    except ValueError:
+        return path if path.is_file() else None
+    except (OSError, ValueError):
         return None
-    return path if path.is_file() else None
 
 
 def _safe_local_path(value: str | None) -> Path | None:
@@ -47,7 +57,12 @@ def delete_uploaded_media(value: str | None) -> bool:
     if path is None:
         return False
     try:
+        parent = path.parent
         path.unlink(missing_ok=True)
+        try:
+            parent.rmdir()
+        except OSError:
+            pass
         return True
     except OSError:
         return False

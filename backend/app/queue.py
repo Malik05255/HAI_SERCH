@@ -22,7 +22,7 @@ def claim_next_job(db: Session) -> Job | None:
 
     head = db.execute(
         select(Job)
-        .where(Job.status.in_(ACTIVE_STATES), Job.archived.is_(False))
+        .where(Job.account_id.is_not(None), Job.status.in_(ACTIVE_STATES))
         .order_by(Job.created_at.asc(), Job.id.asc())
         .with_for_update(skip_locked=True)
         .limit(1)
@@ -31,7 +31,6 @@ def claim_next_job(db: Session) -> Job | None:
     if head is None:
         db.commit()
         return None
-
     if head.status != "queued" or head.stop_requested or head.next_run_at > utcnow():
         db.commit()
         return None

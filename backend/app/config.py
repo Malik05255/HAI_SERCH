@@ -21,10 +21,10 @@ class Settings(BaseSettings):
     search_http_timeout_seconds: int = 15
     search_max_active_jobs: int = 5
     search_idle_sleep_seconds: int = 5
-    # With queue.py's capped exponential backoff, 60 attempts yields roughly
-    # 45 hours of waiting plus actual processing time: close to a two-day
-    # research horizon without keeping CPU busy continuously.
-    search_max_attempts: int = 60
+    # queue.py spreads 48 attempts over roughly 48 hours of backoff, plus
+    # actual processing time, so long searches can run for about two days
+    # without keeping CPU busy continuously.
+    search_max_attempts: int = 48
     search_continue_attempt_floor: int = 8
 
     planner_enabled: bool = True

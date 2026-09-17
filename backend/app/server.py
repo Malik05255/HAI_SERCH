@@ -1,5 +1,7 @@
+import hmac
+
 import httpx
-from fastapi import Depends, HTTPException
+from fastapi import Depends, HTTPException, Query
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -35,33 +37,20 @@ def update_push_token(
     return {"ok": True, "enabled": bool(device.push_token)}
 
 
-@app.get("/v1/results/{result_id}/image")
-async def result_image(
-    result_id: int,
-    principal: Principal = Depends(require_principal),
-    db: Session = Depends(get_db),
-) -> Response:
-    result = db.scalar(
-        select(Result)
-        .join(Job, Result.job_id == Job.id)
-        .where(
-            Result.id == result_id,
-            Result.rank > 0,
-            Job.account_id == principal.account_id,
-        )
-    )
-    if result is None or not (result.image_url or "").strip():
+async def _proxy_result_image(result: Result) -> Response:
+    image_url = (result.image_url or "").strip()
+    if not image_url:
         raise HTTPException(status_code=404, detail="result image not available")
 
     timeout = httpx.Timeout(settings.search_http_timeout_seconds)
     headers = {
-        "User-Agent": "DeepSearch/0.10 (+result image proxy)",
+        "User-Agent": "DeepSearch/0.11 (+result image proxy)",
         "Accept": "image/*",
     }
     try:
         async with EgressRouter(timeout=timeout, headers=headers) as egress:
             upstream, content = await egress.get_bytes(
-                result.image_url,
+                image_url,
                 max_bytes=RESULT_IMAGE_MAX_BYTES,
             )
     except ValueError as error:
@@ -81,5 +70,51 @@ async def result_image(
         headers={
             "Cache-Control": "private, max-age=3600",
             "X-Content-Type-Options": "nosniff",
+            "Referrer-Policy": "no-referrer",
         },
     )
+
+
+@app.get("/v1/results/{result_id}/image")
+async def result_image(
+    result_id: int,
+    principal: Principal = Depends(require_principal),
+    db: Session = Depends(get_db),
+) -> Response:
+    result = db.scalar(
+        select(Result)
+        .join(Job, Result.job_id == Job.id)
+        .where(
+            Result.id == result_id,
+            Result.rank > 0,
+            Job.account_id == principal.account_id,
+        )
+    )
+    if result is None:
+        raise HTTPException(status_code=404, detail="result image not available")
+    return await _proxy_result_image(result)
+
+
+@app.get("/v1/result-images/{result_id}")
+async def result_image_capability(
+    result_id: int,
+    token: str = Query(min_length=20, max_length=128),
+    db: Session = Depends(get_db),
+) -> Response:
+    result = db.scalar(
+        select(Result).where(
+            Result.id == result_id,
+            Result.rank > 0,
+        )
+    )
+    if result is None:
+        raise HTTPException(status_code=404, detail="result image not available")
+
+    evidence = result.evidence if isinstance(result.evidence, dict) else {}
+    expected = str(evidence.get("image_proxy_token") or "")
+    if not expected or not hmac.compare_digest(token, expected):
+        # Keep invalid ids/tokens indistinguishable so this endpoint cannot be
+        # used to enumerate result records.
+        raise HTTPException(status_code=404, detail="result image not available")
+
+    return await _proxy_result_image(result)

@@ -1,7 +1,7 @@
 from datetime import timedelta
 
 from app.models import Job
-from app.queue import _first_runnable_account_head, _head_is_runnable, utcnow
+from app.queue import _backoff_minutes, _first_runnable_account_head, _head_is_runnable, utcnow
 
 
 def _job(account: str, status: str, *, stop: bool = False, delay_minutes: int = -1) -> Job:
@@ -71,3 +71,16 @@ def test_ready_oldest_account_head_keeps_global_worker_priority() -> None:
     selected = _first_runnable_account_head(jobs, now)
 
     assert selected is jobs[0]
+
+
+def test_backoff_grows_but_is_capped() -> None:
+    assert _backoff_minutes(1) == 2
+    assert _backoff_minutes(12) == 16
+    assert _backoff_minutes(30) == 90
+    assert _backoff_minutes(200) == 90
+
+
+def test_default_attempt_budget_spans_about_two_days() -> None:
+    total_minutes = sum(_backoff_minutes(attempt) for attempt in range(1, 49))
+
+    assert 47 * 60 <= total_minutes <= 50 * 60

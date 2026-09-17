@@ -11,6 +11,7 @@ from PIL import Image
 
 from .budget import ResearchBudget
 from .config import settings
+from .egress import EgressRouter
 
 
 TOKEN_RE = re.compile(r"[\w\u0600-\u06ff]+", re.UNICODE)
@@ -101,11 +102,10 @@ async def _searx(
     return response.json().get("results", [])
 
 
-async def _fetch_page(url: str, client: httpx.AsyncClient, sem: asyncio.Semaphore) -> str:
+async def _fetch_page(url: str, egress: EgressRouter, sem: asyncio.Semaphore) -> str:
     async with sem:
         try:
-            response = await client.get(url, follow_redirects=True)
-            response.raise_for_status()
+            response = await egress.get(url)
             content_type = response.headers.get("content-type", "")
             if "text/html" not in content_type and "text/plain" not in content_type:
                 return ""
@@ -115,13 +115,12 @@ async def _fetch_page(url: str, client: httpx.AsyncClient, sem: asyncio.Semaphor
             return ""
 
 
-async def _image_phash(url: str | None, client: httpx.AsyncClient, sem: asyncio.Semaphore) -> str:
+async def _image_phash(url: str | None, egress: EgressRouter, sem: asyncio.Semaphore) -> str:
     if not url or not url.startswith(("http://", "https://")):
         return ""
     async with sem:
         try:
-            response = await client.get(url, follow_redirects=True)
-            response.raise_for_status()
+            response = await egress.get(url)
             content_type = response.headers.get("content-type", "")
             if not content_type.startswith("image/") or len(response.content) > 6 * 1024 * 1024:
                 return ""
@@ -174,66 +173,67 @@ async def run_research(
     reference_hashes: list[str] | None = None,
 ) -> list[Candidate]:
     reference_hashes = reference_hashes or []
-    proxy = settings.egress_proxy_url or None
     timeout = httpx.Timeout(settings.search_http_timeout_seconds)
-    headers = {"User-Agent": "DeepSearch/0.3 (+personal research assistant)"}
+    headers = {"User-Agent": "DeepSearch/0.4 (+personal research assistant)"}
 
-    async with httpx.AsyncClient(timeout=timeout, headers=headers, proxy=proxy) as client:
-        raw: dict[str, Candidate] = {}
-        page = min(5, 1 + attempt // 3)
-        queries = make_queries(query, attempt)
+    # SearXNG is an internal Docker service and must always remain direct.
+    async with httpx.AsyncClient(timeout=timeout, headers=headers, follow_redirects=True) as search_client:
+        async with EgressRouter(timeout=timeout, headers=headers) as egress:
+            raw: dict[str, Candidate] = {}
+            page = min(5, 1 + attempt // 3)
+            queries = make_queries(query, attempt)
 
-        for query_index, search_query in enumerate(queries):
-            batches: list[list[dict]] = []
-            try:
-                batches.append(await _searx(search_query, page, client))
-            except Exception:
-                pass
-
-            # Media searches additionally query image engines. Limit image-engine
-            # expansion to the first few query variants to protect the free VM.
-            if reference_hashes and query_index < 4:
+            for query_index, search_query in enumerate(queries):
+                batches: list[list[dict]] = []
                 try:
-                    batches.append(await _searx(search_query, min(page, 2), client, categories="images"))
+                    batches.append(await _searx(search_query, page, search_client))
                 except Exception:
                     pass
 
-            for items in batches:
-                for item in items:
-                    candidate = _candidate_from_item(item)
-                    if candidate is None:
-                        continue
-                    if candidate.url in raw:
-                        existing = raw[candidate.url]
-                        if not existing.image_url and candidate.image_url:
-                            existing.image_url = candidate.image_url
-                        continue
-                    candidate.score = overlap_score(query, f"{candidate.title} {candidate.snippet}")
-                    raw[candidate.url] = candidate
+                # Media searches additionally query image engines. Limit image-engine
+                # expansion to the first few query variants to protect the free VM.
+                if reference_hashes and query_index < 4:
+                    try:
+                        batches.append(await _searx(search_query, min(page, 2), search_client, categories="images"))
+                    except Exception:
+                        pass
+
+                for items in batches:
+                    for item in items:
+                        candidate = _candidate_from_item(item)
+                        if candidate is None:
+                            continue
+                        if candidate.url in raw:
+                            existing = raw[candidate.url]
+                            if not existing.image_url and candidate.image_url:
+                                existing.image_url = candidate.image_url
+                            continue
+                        candidate.score = overlap_score(query, f"{candidate.title} {candidate.snippet}")
+                        raw[candidate.url] = candidate
+                        if len(raw) >= budget.max_candidates:
+                            break
                     if len(raw) >= budget.max_candidates:
                         break
                 if len(raw) >= budget.max_candidates:
                     break
-            if len(raw) >= budget.max_candidates:
-                break
 
-        prelim = sorted(raw.values(), key=lambda c: c.score, reverse=True)[: max(budget.verify_pages * 2, budget.verify_pages)]
-        sem = asyncio.Semaphore(budget.http_concurrency)
+            prelim = sorted(raw.values(), key=lambda c: c.score, reverse=True)[: max(budget.verify_pages * 2, budget.verify_pages)]
+            sem = asyncio.Semaphore(budget.http_concurrency)
 
-        if reference_hashes:
-            image_hashes = await asyncio.gather(*[_image_phash(c.image_url, client, sem) for c in prelim])
-            for candidate, fingerprint in zip(prelim, image_hashes):
-                candidate.visual_score, candidate.visual_distance = _visual_match(reference_hashes, fingerprint)
+            if reference_hashes:
+                image_hashes = await asyncio.gather(*[_image_phash(c.image_url, egress, sem) for c in prelim])
+                for candidate, fingerprint in zip(prelim, image_hashes):
+                    candidate.visual_score, candidate.visual_distance = _visual_match(reference_hashes, fingerprint)
 
-        ranked = sorted(
-            prelim,
-            key=lambda c: (
-                c.visual_distance is not None and c.visual_distance <= settings.visual_hash_max_distance,
-                c.visual_score * 0.65 + c.score * 100 * 0.35,
-            ),
-            reverse=True,
-        )[: budget.verify_pages]
-        texts = await asyncio.gather(*[_fetch_page(c.url, client, sem) for c in ranked])
+            ranked = sorted(
+                prelim,
+                key=lambda c: (
+                    c.visual_distance is not None and c.visual_distance <= settings.visual_hash_max_distance,
+                    c.visual_score * 0.65 + c.score * 100 * 0.35,
+                ),
+                reverse=True,
+            )[: budget.verify_pages]
+            texts = await asyncio.gather(*[_fetch_page(c.url, egress, sem) for c in ranked])
 
     verified: list[Candidate] = []
     for candidate, page_text in zip(ranked, texts):

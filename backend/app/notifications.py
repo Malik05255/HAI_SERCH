@@ -56,12 +56,29 @@ def _delivery_map(db: Session, job_id: str) -> dict[str, NotificationDelivery]:
     return {row.device_id: row for row in rows}
 
 
+def _utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _delivery_is_from_older_completion(job: Job, delivery: NotificationDelivery) -> bool:
+    job_updated = _utc(job.updated_at)
+    delivery_updated = _utc(delivery.updated_at)
+    return bool(job_updated and delivery_updated and delivery_updated < job_updated)
+
+
 def send_job_pushes(db: Session, job: Job) -> bool:
     """Deliver completion notifications independently to each registered device.
 
     A successful device is persisted as ``sent`` and is never notified again for
     this completion cycle. Invalid tokens become ``discarded``. Transient failures
     remain ``pending`` so the runtime retries only those devices after restarts.
+    When the same job completes again after a continued search, its newer
+    ``updated_at`` marks the previous per-device deliveries as stale and starts a
+    fresh completion cycle without needing a separate notification generation.
     """
     if not settings.notifications_enabled or not job.account_id:
         return True
@@ -79,15 +96,20 @@ def send_job_pushes(db: Session, job: Job) -> bool:
         return True
 
     deliveries = _delivery_map(db, job.id)
-    created = False
+    changed = False
     for device in devices:
-        if device.id in deliveries:
+        delivery = deliveries.get(device.id)
+        if delivery is None:
+            delivery = NotificationDelivery(job_id=job.id, device_id=device.id, state="pending")
+            db.add(delivery)
+            deliveries[device.id] = delivery
+            changed = True
             continue
-        delivery = NotificationDelivery(job_id=job.id, device_id=device.id, state="pending")
-        db.add(delivery)
-        deliveries[device.id] = delivery
-        created = True
-    if created:
+        if _delivery_is_from_older_completion(job, delivery):
+            delivery.state = "pending"
+            delivery.sent_at = None
+            changed = True
+    if changed:
         db.commit()
 
     pending_devices = [

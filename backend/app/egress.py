@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import socket
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import httpx
 
@@ -19,6 +19,8 @@ _NETWORK_ERRORS = (
     httpx.RemoteProtocolError,
 )
 _BLOCKED_HOST_SUFFIXES = (".localhost", ".local", ".internal", ".home.arpa")
+_REDIRECT_STATUSES = {301, 302, 303, 307, 308}
+_MAX_REDIRECTS = 5
 
 
 def _public_ip(value: str) -> bool:
@@ -69,11 +71,11 @@ async def public_web_target(url: str) -> bool:
 class EgressRouter:
     """Route public web requests through direct or VPN-backed proxy egress.
 
-    Internal services such as SearXNG must use their own direct Docker-network
-    client and never pass through this router. In auto mode we prefer a sticky
-    successful route for each host. A route switch happens only for transport
-    failures or HTTP 451; 403/429/CAPTCHA-like responses are deliberately not
-    treated as a reason to rotate egress.
+    Every redirect target is validated before the next request so a public URL
+    cannot redirect the research worker into loopback/private/link-local space.
+    In auto mode a successful route remains sticky per original host. Route
+    switching happens only for transport failures or HTTP 451, never for
+    application-level denials such as 403/429/CAPTCHA pages.
     """
 
     def __init__(self, *, timeout: httpx.Timeout, headers: dict[str, str]):
@@ -84,9 +86,9 @@ class EgressRouter:
         self.proxy_url = settings.egress_proxy_url.strip() or None
         self._sticky: dict[str, str] = {}
         self._safe_targets: dict[tuple[str, int | None], bool] = {}
-        self._direct = httpx.AsyncClient(timeout=timeout, headers=headers, follow_redirects=True)
+        self._direct = httpx.AsyncClient(timeout=timeout, headers=headers, follow_redirects=False)
         self._vpn = (
-            httpx.AsyncClient(timeout=timeout, headers=headers, follow_redirects=True, proxy=self.proxy_url)
+            httpx.AsyncClient(timeout=timeout, headers=headers, follow_redirects=False, proxy=self.proxy_url)
             if self.proxy_url
             else None
         )
@@ -131,6 +133,31 @@ class EgressRouter:
             self._safe_targets[key] = await public_web_target(url)
         return self._safe_targets[key]
 
+    async def _validated_get(self, client: httpx.AsyncClient, url: str, kwargs: dict) -> httpx.Response:
+        current = url
+        request_kwargs = dict(kwargs)
+        request_kwargs["follow_redirects"] = False
+
+        for redirect_count in range(_MAX_REDIRECTS + 1):
+            if not await self._target_allowed(current):
+                raise httpx.InvalidURL("public web egress target required")
+
+            response = await client.get(current, **request_kwargs)
+            if response.status_code not in _REDIRECT_STATUSES:
+                return response
+
+            location = response.headers.get("location")
+            if not location:
+                return response
+            if redirect_count >= _MAX_REDIRECTS:
+                raise httpx.TooManyRedirects(
+                    "too many public web redirects",
+                    request=response.request,
+                )
+            current = urljoin(str(response.url), location)
+
+        raise RuntimeError("redirect handling exhausted")
+
     async def get(self, url: str, **kwargs) -> httpx.Response:
         if not await self._target_allowed(url):
             raise httpx.InvalidURL("public web egress target required")
@@ -142,9 +169,7 @@ class EgressRouter:
         for index, route in enumerate(routes):
             client = self._client(route)
             try:
-                response = await client.get(url, **kwargs)
-                # 451 represents legal/geographic unavailability and is the one
-                # HTTP status for which auto mode may try the alternate egress.
+                response = await self._validated_get(client, url, kwargs)
                 if response.status_code == 451 and index + 1 < len(routes):
                     last_error = httpx.HTTPStatusError(
                         "Unavailable For Legal Reasons",
@@ -162,7 +187,6 @@ class EgressRouter:
                     continue
                 raise
             except httpx.HTTPStatusError:
-                # Do not rotate on 403/429 or other application-level denials.
                 raise
 
         if last_error is not None:

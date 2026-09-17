@@ -71,16 +71,12 @@ def finish_job(db, job, status: str, progress: float | None = None, purge_media:
     should_notify = status in PUSH_COMPLETION_STATES and settings.notifications_enabled
     job.notification_pending = should_notify
     if should_notify:
-        # A continued/re-run job is allowed to produce a new completion
-        # notification, so clear the previous delivery timestamp here.
         job.notification_sent_at = None
     db.commit()
 
     if not should_notify:
         return
 
-    # Push delivery is best-effort and outside the research transaction. When
-    # it fails the pending bit remains in PostgreSQL for runtime retry.
     try:
         delivered = send_job_pushes(db, job)
     except Exception:
@@ -116,6 +112,36 @@ def _domain(value: str) -> str:
         return host.removeprefix("www.")
     except Exception:
         return ""
+
+
+def _evidence_quality(evidence: dict | None) -> tuple[int, float, int, int, int, int]:
+    value = evidence if isinstance(evidence, dict) else {}
+    return (
+        1 if value.get("visual_match") is True else 0,
+        float(value.get("visual_score") or 0.0),
+        1 if value.get("verified_page") is True else 0,
+        1 if value.get("vision_used") is True else 0,
+        1 if value.get("speech_used") is True else 0,
+        1 if value.get("ocr_used") is True else 0,
+    )
+
+
+def _merge_stronger_evidence(current: dict | None, incoming: dict) -> tuple[dict, bool]:
+    existing = dict(current or {})
+    incoming_value = dict(incoming)
+    existing_token = str(existing.get("image_proxy_token") or "").strip()
+    incoming_token = str(incoming_value.get("image_proxy_token") or "").strip()
+    if existing_token and not incoming_token:
+        incoming_value["image_proxy_token"] = existing_token
+
+    replace = _evidence_quality(incoming_value) > _evidence_quality(existing)
+    if replace:
+        return incoming_value, True
+
+    if incoming_token and not existing_token:
+        existing["image_proxy_token"] = incoming_token
+        return existing, True
+    return existing, False
 
 
 def _diverse_order(results: list[Result], target: int) -> list[Result]:
@@ -231,9 +257,6 @@ def process_one() -> bool:
                 finish_job(db, job, "stopped")
                 return True
             if job.context_revision != context_revision:
-                # A clue arrived from Android/Windows while this round was
-                # running. Discard stale candidates and immediately rerun with
-                # the newest context instead of completing on obsolete evidence.
                 _requeue_now(db, job)
                 return True
 
@@ -261,14 +284,19 @@ def process_one() -> bool:
                 if current_result is not None:
                     if candidate.image_url and not current_result.image_url:
                         current_result.image_url = candidate.image_url
-                    if candidate.score > current_result.match_score:
+
+                    stronger_evidence, evidence_changed = _merge_stronger_evidence(
+                        current_result.evidence,
+                        evidence,
+                    )
+                    score_improved = candidate.score > current_result.match_score
+                    if score_improved:
                         current_result.match_score = candidate.score
                         current_result.summary = candidate.summary
-                        current_result.evidence = evidence
-                    elif image_proxy_token and not (current_result.evidence or {}).get("image_proxy_token"):
-                        preserved = dict(current_result.evidence or {})
-                        preserved["image_proxy_token"] = image_proxy_token
-                        current_result.evidence = preserved
+                    elif evidence_changed and candidate.page_verified and candidate.summary:
+                        current_result.summary = candidate.summary
+                    if evidence_changed:
+                        current_result.evidence = stronger_evidence
                     continue
 
                 result = Result(

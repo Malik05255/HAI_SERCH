@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 
@@ -23,8 +24,8 @@ if gradle.exists():
     text = gradle.read_text(encoding="utf-8")
     text = text.replace("compileSdk = flutter.compileSdkVersion", "compileSdk = 36")
     text = text.replace("minSdk = flutter.minSdkVersion", "minSdk = 23")
-    text = text.replace('namespace = "com.hai.deep_search"', 'namespace = "com.hai.deep_search"')
-    text = text.replace('applicationId = "com.hai.deep_search"', 'applicationId = "com.hai.deep_search"')
+    text = re.sub(r'namespace\s*=\s*"[^"]+"', 'namespace = "com.hai.deep_search"', text, count=1)
+    text = re.sub(r'applicationId\s*=\s*"[^"]+"', 'applicationId = "com.hai.deep_search"', text, count=1)
 
     old = 'signingConfig = signingConfigs.getByName("debug")'
     new = '''signingConfig = signingConfigs.create("release") {

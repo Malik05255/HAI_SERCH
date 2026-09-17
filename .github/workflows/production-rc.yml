@@ -1,6 +1,8 @@
 name: Production RC
 
 on:
+  push:
+    branches: ["production-rc"]
   workflow_dispatch:
     inputs:
       version:
@@ -53,7 +55,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.ref }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.sha }}
           fetch-depth: 0
 
       - id: meta
@@ -62,7 +64,11 @@ jobs:
         run: |
           set -euo pipefail
 
-          TAG="${{ inputs.version }}"
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            TAG="${{ inputs.version }}"
+          else
+            TAG="v1.0.0-rc.1"
+          fi
           [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$ ]] || {
             echo "Version must look like v1.0.0-rc.1"
             exit 1
@@ -122,7 +128,7 @@ jobs:
           chmod 600 ~/.ssh/known_hosts
 
       - name: Bootstrap fresh server
-        if: ${{ inputs.bootstrap }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.bootstrap }}
         shell: bash
         run: |
           cat scripts/bootstrap_server.sh | ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes "$DEPLOY_USER@$DEPLOY_HOST" "sudo bash -s -- '$DEPLOY_USER'"

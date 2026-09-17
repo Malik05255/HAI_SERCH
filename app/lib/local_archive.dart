@@ -79,7 +79,7 @@ class LocalArchiveStore {
     try {
       if (job.inputType != 'text') {
         if (!job.mediaAvailable) throw StateError('media-not-available');
-        final downloaded = await ApiClient().downloadMedia(job.id, dir);
+        final downloaded = await ApiClient(enableRealtime: false).downloadMedia(job.id, dir);
         mediaFileName = downloaded.uri.pathSegments.last;
         mediaName = job.inputType == 'video' ? 'الفيديو الأصلي' : 'الصورة الأصلية';
       }
@@ -134,8 +134,6 @@ class LocalArchiveStore {
   }
 
   Future<void> restoreArchive(String jobId) async {
-    // Restoring means removing the local snapshot so the synchronized cloud
-    // task appears again in Previous Tasks. Cloud data itself is untouched.
     await deleteArchive(jobId);
   }
 }

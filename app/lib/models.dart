@@ -8,7 +8,6 @@ class SearchJob {
     required this.foundCount,
     required this.targetResults,
     required this.attempts,
-    required this.archived,
     this.queuePosition,
   });
 
@@ -21,7 +20,6 @@ class SearchJob {
   final int targetResults;
   final int attempts;
   final int? queuePosition;
-  final bool archived;
 
   factory SearchJob.fromJson(Map<String, dynamic> json) => SearchJob(
         id: json['id'] as String,
@@ -33,7 +31,6 @@ class SearchJob {
         targetResults: (json['target_results'] as num?)?.toInt() ?? 10,
         attempts: (json['attempts'] as num?)?.toInt() ?? 0,
         queuePosition: (json['queue_position'] as num?)?.toInt(),
-        archived: (json['archived'] as bool?) ?? false,
       );
 
   String get title => query.trim().isEmpty
@@ -65,7 +62,16 @@ class SearchResult {
         title: (json['title'] as String?) ?? '',
         url: (json['url'] as String?) ?? '',
         summary: (json['summary'] as String?) ?? '',
-        score: (json['match_score'] as num?)?.toDouble() ?? 0,
+        score: (json['match_score'] as num?)?.toDouble() ?? (json['score'] as num?)?.toDouble() ?? 0,
         imageUrl: json['image_url'] as String?,
       );
+
+  Map<String, dynamic> toJson() => {
+        'rank': rank,
+        'title': title,
+        'url': url,
+        'summary': summary,
+        'match_score': score,
+        'image_url': imageUrl,
+      };
 }

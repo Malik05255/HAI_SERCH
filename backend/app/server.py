@@ -1,21 +1,24 @@
+import asyncio
 import hmac
+import json
 
 import httpx
-from fastapi import Depends, HTTPException, Query
+from fastapi import Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .auth import Principal, require_principal
+from .auth import Principal, principal_for_token, require_principal
 from .config import settings
-from .database import get_db
+from .database import SessionLocal, get_db
 from .egress import EgressRouter
 from .main import app
 from .models import Device, Job, Result
 
 
 RESULT_IMAGE_MAX_BYTES = 6 * 1024 * 1024
+REALTIME_INTERVAL_SECONDS = 2.0
 
 
 class PushTokenUpdate(BaseModel):
@@ -35,6 +38,78 @@ def update_push_token(
     device.push_token = token or None
     db.commit()
     return {"ok": True, "enabled": bool(device.push_token)}
+
+
+def _realtime_snapshot(principal: Principal) -> list[dict] | None:
+    with SessionLocal() as db:
+        device = db.get(Device, principal.device_id)
+        if device is None or device.account_id != principal.account_id:
+            return None
+        jobs = list(
+            db.scalars(
+                select(Job)
+                .where(Job.account_id == principal.account_id)
+                .order_by(Job.updated_at.desc(), Job.id.asc())
+                .limit(100)
+            ).all()
+        )
+        return [
+            {
+                "id": job.id,
+                "status": job.status,
+                "progress": round(float(job.progress or 0), 4),
+                "found_count": job.found_count,
+                "target_results": job.target_results,
+                "attempts": job.attempts,
+                "updated_at": job.updated_at.isoformat() if job.updated_at else None,
+            }
+            for job in jobs
+        ]
+
+
+@app.websocket("/v1/ws")
+async def realtime_jobs(websocket: WebSocket) -> None:
+    authorization = websocket.headers.get("authorization", "")
+    if not authorization.startswith("Bearer "):
+        await websocket.close(code=4401)
+        return
+
+    with SessionLocal() as db:
+        principal = principal_for_token(db, authorization[7:])
+    if principal is None:
+        await websocket.close(code=4401)
+        return
+
+    await websocket.accept()
+    previous = ""
+    try:
+        while True:
+            snapshot = await asyncio.to_thread(_realtime_snapshot, principal)
+            if snapshot is None:
+                await websocket.close(code=4401)
+                return
+
+            fingerprint = json.dumps(snapshot, sort_keys=True, separators=(",", ":"))
+            if fingerprint != previous:
+                await websocket.send_json({"type": "jobs.changed", "jobs": snapshot})
+                previous = fingerprint
+
+            try:
+                message = await asyncio.wait_for(
+                    websocket.receive_text(),
+                    timeout=REALTIME_INTERVAL_SECONDS,
+                )
+                if message == "ping":
+                    await websocket.send_json({"type": "pong"})
+            except asyncio.TimeoutError:
+                pass
+    except WebSocketDisconnect:
+        return
+    except Exception:
+        try:
+            await websocket.close(code=1011)
+        except Exception:
+            pass
 
 
 async def _proxy_result_image(result: Result) -> Response:
@@ -113,8 +188,6 @@ async def result_image_capability(
     evidence = result.evidence if isinstance(result.evidence, dict) else {}
     expected = str(evidence.get("image_proxy_token") or "")
     if not expected or not hmac.compare_digest(token, expected):
-        # Keep invalid ids/tokens indistinguishable so this endpoint cannot be
-        # used to enumerate result records.
         raise HTTPException(status_code=404, detail="result image not available")
 
     return await _proxy_result_image(result)

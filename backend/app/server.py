@@ -41,6 +41,19 @@ def update_push_token(
     if device is None:
         raise HTTPException(status_code=404, detail="device not found")
     token = (payload.token or "").strip()
+    if token:
+        # An FCM registration token identifies one app installation. If the
+        # same installation was re-created or re-linked, move the token to the
+        # current device instead of sending duplicate pushes through an old
+        # device row.
+        db.execute(
+            update(Device)
+            .where(
+                Device.push_token == token,
+                Device.id != principal.device_id,
+            )
+            .values(push_token=None)
+        )
     device.push_token = token or None
     db.commit()
     return {"ok": True, "enabled": bool(device.push_token)}

@@ -75,7 +75,6 @@ for folder, pixels in android_sizes.items():
 # the magnifier handle.
 if res.exists():
     foreground = Image.new("RGBA", (432, 432), (0, 0, 0, 0))
-    # Scale the 1024 master mark to ~52% and center it in the safe zone.
     draw_mark(foreground, scale=0.52, offset=(-95, -88))
     drawable = res / "drawable-nodpi"
     drawable.mkdir(parents=True, exist_ok=True)
@@ -84,7 +83,11 @@ if res.exists():
     values = res / "values"
     values.mkdir(parents=True, exist_ok=True)
     (values / "ic_launcher_colors.xml").write_text(
-        """<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<resources>\n    <color name=\"ic_launcher_background\">#2357D9</color>\n</resources>\n""",
+        """<?xml version=\"1.0\" encoding=\"utf-8\"?>
+<resources>
+    <color name=\"ic_launcher_background\">#2357D9</color>
+</resources>
+""",
         encoding="utf-8",
     )
 
@@ -98,6 +101,19 @@ if res.exists():
 """
     (adaptive / "ic_launcher.xml").write_text(adaptive_xml, encoding="utf-8")
     (adaptive / "ic_launcher_round.xml").write_text(adaptive_xml, encoding="utf-8")
+
+    # Reference the round icon only after the resource exists. This keeps
+    # prepare_platforms.py safe for builds that do not run icon generation.
+    manifest = APP / "android" / "app" / "src" / "main" / "AndroidManifest.xml"
+    if manifest.exists():
+        text = manifest.read_text(encoding="utf-8")
+        if "android:roundIcon=" not in text:
+            text = text.replace(
+                'android:icon="@mipmap/ic_launcher"',
+                'android:icon="@mipmap/ic_launcher"\n        android:roundIcon="@mipmap/ic_launcher_round"',
+                1,
+            )
+        manifest.write_text(text, encoding="utf-8")
 
 # Windows executable icon uses the same identity.
 win = APP / "windows" / "runner" / "resources"

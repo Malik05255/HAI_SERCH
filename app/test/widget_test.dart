@@ -85,6 +85,22 @@ void main() {
     expect(_job(lastError: null).userErrorLabel, isNull);
   });
 
+  test('result keeps server id for secure thumbnail capability routing', () {
+    final result = SearchResult.fromJson({
+      'id': 42,
+      'rank': 1,
+      'title': 'نتيجة',
+      'url': 'https://example.com/item',
+      'summary': 'ملخص',
+      'match_score': 91,
+      'image_url': null,
+      'evidence': <String, dynamic>{},
+    });
+
+    expect(result.id, 42);
+    expect(result.toJson()['id'], 42);
+  });
+
   test('strong visual evidence is explained to the user', () {
     expect(
       _result({'visual_match': true, 'visual_score': 96}).evidenceLabel,

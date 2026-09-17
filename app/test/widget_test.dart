@@ -101,6 +101,32 @@ void main() {
     expect(result.toJson()['id'], 42);
   });
 
+  test('legacy external thumbnails are rejected by the model', () {
+    final external = SearchResult.fromJson({
+      'id': 1,
+      'rank': 1,
+      'title': 'قديم',
+      'url': 'https://example.com',
+      'summary': '',
+      'match_score': 80,
+      'image_url': 'https://cdn.example.com/poster.jpg',
+      'evidence': <String, dynamic>{},
+    });
+    final proxied = SearchResult.fromJson({
+      'id': 2,
+      'rank': 1,
+      'title': 'آمن',
+      'url': 'https://example.com',
+      'summary': '',
+      'match_score': 80,
+      'image_url': 'https://deep.example/v1/result-images/2?token=abc',
+      'evidence': <String, dynamic>{},
+    });
+
+    expect(external.imageUrl, isNull);
+    expect(proxied.imageUrl, isNotNull);
+  });
+
   test('strong visual evidence is explained to the user', () {
     expect(
       _result({'visual_match': true, 'visual_score': 96}).evidenceLabel,

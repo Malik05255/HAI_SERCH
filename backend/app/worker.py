@@ -7,7 +7,7 @@ from sqlalchemy import select
 from .budget import budget_for_job
 from .config import settings
 from .database import Base, SessionLocal, engine
-from .media import delete_uploaded_media, enrich_query
+from .media import delete_uploaded_media, enrich_query, visual_hashes
 from .models import Result
 from .queue import claim_next_job, requeue
 from .research import run_research
@@ -44,12 +44,20 @@ def process_one() -> bool:
 
         budget = budget_for_job(job.attempts - 1)
         effective_query = enrich_query(job.query, job.input_url, job.input_type, budget.video_keyframes)
+        hashes = visual_hashes(job.input_url, job.input_type, budget.video_keyframes)
         if not effective_query:
             finish_job(db, job, "needs_context")
             return True
 
         try:
-            candidates = asyncio.run(run_research(effective_query, job.attempts - 1, budget))
+            candidates = asyncio.run(
+                run_research(
+                    effective_query,
+                    job.attempts - 1,
+                    budget,
+                    reference_hashes=hashes,
+                )
+            )
             db.refresh(job)
             if job.status == "cancelled":
                 purge_job_media(job)
@@ -61,11 +69,21 @@ def process_one() -> bool:
 
             existing = {r.url: r for r in db.scalars(select(Result).where(Result.job_id == job.id)).all()}
             for candidate in candidates:
+                evidence = {
+                    "verified_page": bool(candidate.summary),
+                    "attempt": job.attempts,
+                    "media_enriched": effective_query != job.query,
+                    "visual_score": candidate.visual_score,
+                    "visual_distance": candidate.visual_distance,
+                    "visual_match": candidate.visual_distance is not None
+                    and candidate.visual_distance <= settings.visual_hash_max_distance,
+                }
                 if candidate.url in existing:
                     result = existing[candidate.url]
                     if candidate.score > result.match_score:
                         result.match_score = candidate.score
                         result.summary = candidate.summary
+                        result.evidence = evidence
                     continue
                 result = Result(
                     job_id=job.id,
@@ -74,11 +92,7 @@ def process_one() -> bool:
                     image_url=candidate.image_url,
                     summary=candidate.summary,
                     match_score=candidate.score,
-                    evidence={
-                        "verified_page": bool(candidate.summary),
-                        "attempt": job.attempts,
-                        "media_enriched": effective_query != job.query,
-                    },
+                    evidence=evidence,
                 )
                 db.add(result)
                 existing[candidate.url] = result

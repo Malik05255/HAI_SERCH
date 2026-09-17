@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
@@ -180,6 +181,18 @@ class ApiClient {
     _ensureOk(response);
     final items = jsonDecode(response.body) as List<dynamic>;
     return items.map((e) => SearchResult.fromJson(e as Map<String, dynamic>)).toList();
+  }
+
+  Future<Uint8List?> resultImage(int resultId) async {
+    if (resultId <= 0) return null;
+    final response = await _authorized(
+      (headers) => http.get(Uri.parse('$baseUrl/v1/results/$resultId/image'), headers: headers),
+    );
+    if (const {404, 413, 415, 502}.contains(response.statusCode)) return null;
+    _ensureOk(response);
+    final contentType = response.headers['content-type']?.toLowerCase() ?? '';
+    if (!contentType.startsWith('image/') || response.bodyBytes.isEmpty) return null;
+    return response.bodyBytes;
   }
 
   Future<void> action(String jobId, String action) async {

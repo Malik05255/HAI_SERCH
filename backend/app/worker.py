@@ -43,6 +43,15 @@ def _reload_job(db, job_id: str) -> Job | None:
     )
 
 
+def _requeue_now(db, job: Job) -> None:
+    job.status = "queued"
+    job.stop_requested = False
+    job.next_run_at = utcnow()
+    job.heartbeat_at = None
+    job.last_error = None
+    db.commit()
+
+
 def purge_job_media(job) -> None:
     if job.input_url:
         delete_uploaded_media(job.input_url)
@@ -64,6 +73,7 @@ def _effective_query(job, features: dict) -> str:
         part.strip()
         for part in (
             job.query,
+            job.context_text,
             features.get("ocr", ""),
             features.get("transcript", ""),
             features.get("vision", ""),
@@ -144,8 +154,6 @@ def process_one() -> bool:
             budget = budget_for_job(job.attempts - 1)
             features = media_features(job.input_url, job.input_type, budget.video_keyframes)
 
-            # Media analysis may take minutes. Re-read the row so a concurrent
-            # cancel/delete is observed before any state is committed.
             current = _reload_job(db, job_id)
             if current is None:
                 db.rollback()
@@ -169,6 +177,7 @@ def process_one() -> bool:
                 return True
 
             effective_query = _effective_query(job, features)
+            context_revision = job.context_revision
             hashes = list(features.get("hashes", []))
             if not effective_query:
                 job.last_error = "insufficient_context"
@@ -198,6 +207,12 @@ def process_one() -> bool:
             if job.stop_requested:
                 finish_job(db, job, "stopped")
                 return True
+            if job.context_revision != context_revision:
+                # A clue arrived from Android/Windows while this round was
+                # running. Discard stale candidates and immediately rerun with
+                # the newest context instead of completing on obsolete evidence.
+                _requeue_now(db, job)
+                return True
 
             existing = {r.url: r for r in db.scalars(select(Result).where(Result.job_id == job.id)).all()}
             for candidate in candidates:
@@ -206,6 +221,7 @@ def process_one() -> bool:
                 evidence = {
                     "verified_page": candidate.page_verified,
                     "attempt": job.attempts,
+                    "context_revision": context_revision,
                     "planner_used": bool(planned_queries),
                     "media_enriched": bool(features.get("ocr") or features.get("transcript") or features.get("vision")),
                     "vision_used": bool(features.get("vision")),
@@ -276,9 +292,6 @@ def process_one() -> bool:
                 db.commit()
                 requeue(db, job)
         except Exception as error:
-            # Roll back first: a flush/commit failure can leave the SQLAlchemy
-            # session unusable. Then re-read from PostgreSQL instead of touching
-            # a stale ORM object that may have been deleted concurrently.
             db.rollback()
             current = _reload_job(db, job_id)
             if current is None:

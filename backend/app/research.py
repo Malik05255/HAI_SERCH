@@ -1,10 +1,13 @@
 import asyncio
+import io
 import re
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
 import httpx
+import imagehash
 import trafilatura
+from PIL import Image
 
 from .budget import ResearchBudget
 from .config import settings
@@ -21,6 +24,8 @@ class Candidate:
     snippet: str
     summary: str
     score: float
+    visual_score: float = 0.0
+    visual_distance: int | None = None
 
 
 def tokens(text: str) -> set[str]:
@@ -35,13 +40,26 @@ def overlap_score(query: str, text: str) -> float:
     return len(q & t) / len(q)
 
 
+def _query_chunks(text: str) -> list[str]:
+    clean = " ".join(text.split())
+    if len(clean) <= 360:
+        return [clean]
+    size = 300
+    chunks = [clean[:size], clean[-size:]]
+    middle = max(0, len(clean) // 2 - size // 2)
+    chunks.append(clean[middle : middle + size])
+    seen: set[str] = set()
+    return [chunk for chunk in chunks if chunk and not (chunk in seen or seen.add(chunk))]
+
+
 def make_queries(query: str, attempt: int) -> list[str]:
-    base = query.strip()
-    queries = [base]
+    chunks = _query_chunks(query)
+    base = chunks[0] if chunks else query.strip()
+    queries = list(chunks)
     if len(base) < 180:
         queries.append(f'"{base}"')
 
-    lowered = base.casefold()
+    lowered = query.casefold()
     if any(x in lowered for x in ("فيلم", "مسلسل", "movie", "film", "series")):
         queries.extend([f"{base} plot", f"{base} ending", f"{base} ending explained"])
     if "صيني" in lowered or "chinese" in lowered:
@@ -54,7 +72,8 @@ def make_queries(query: str, attempt: int) -> list[str]:
     seen: set[str] = set()
     unique: list[str] = []
     for item in queries:
-        if item not in seen:
+        item = " ".join(item.split())[:500]
+        if item and item not in seen:
             seen.add(item)
             unique.append(item)
     return unique
@@ -83,10 +102,45 @@ async def _fetch_page(url: str, client: httpx.AsyncClient, sem: asyncio.Semaphor
             return ""
 
 
-async def run_research(query: str, attempt: int, budget: ResearchBudget) -> list[Candidate]:
+async def _image_phash(url: str | None, client: httpx.AsyncClient, sem: asyncio.Semaphore) -> str:
+    if not url or not url.startswith(("http://", "https://")):
+        return ""
+    async with sem:
+        try:
+            response = await client.get(url, follow_redirects=True)
+            response.raise_for_status()
+            content_type = response.headers.get("content-type", "")
+            if not content_type.startswith("image/") or len(response.content) > 6 * 1024 * 1024:
+                return ""
+            with Image.open(io.BytesIO(response.content)) as image:
+                return str(imagehash.phash(image.convert("RGB")))
+        except Exception:
+            return ""
+
+
+def _visual_match(reference_hashes: list[str], candidate_hash: str) -> tuple[float, int | None]:
+    if not reference_hashes or not candidate_hash:
+        return 0.0, None
+    try:
+        candidate = imagehash.hex_to_hash(candidate_hash)
+        distances = [candidate - imagehash.hex_to_hash(value) for value in reference_hashes]
+        distance = min(distances)
+        score = max(0.0, 1.0 - distance / 64.0) * 100.0
+        return round(score, 2), distance
+    except Exception:
+        return 0.0, None
+
+
+async def run_research(
+    query: str,
+    attempt: int,
+    budget: ResearchBudget,
+    reference_hashes: list[str] | None = None,
+) -> list[Candidate]:
+    reference_hashes = reference_hashes or []
     proxy = settings.egress_proxy_url or None
     timeout = httpx.Timeout(settings.search_http_timeout_seconds)
-    headers = {"User-Agent": "DeepSearch/0.1 (+personal research assistant)"}
+    headers = {"User-Agent": "DeepSearch/0.2 (+personal research assistant)"}
 
     async with httpx.AsyncClient(timeout=timeout, headers=headers, proxy=proxy) as client:
         raw: dict[str, Candidate] = {}
@@ -116,15 +170,37 @@ async def run_research(query: str, attempt: int, budget: ResearchBudget) -> list
             if len(raw) >= budget.max_candidates:
                 break
 
-        ranked = sorted(raw.values(), key=lambda c: c.score, reverse=True)[: budget.verify_pages]
+        prelim = sorted(raw.values(), key=lambda c: c.score, reverse=True)[: max(budget.verify_pages * 2, budget.verify_pages)]
         sem = asyncio.Semaphore(budget.http_concurrency)
+
+        if reference_hashes:
+            image_hashes = await asyncio.gather(*[_image_phash(c.image_url, client, sem) for c in prelim])
+            for candidate, fingerprint in zip(prelim, image_hashes):
+                candidate.visual_score, candidate.visual_distance = _visual_match(reference_hashes, fingerprint)
+
+        ranked = sorted(
+            prelim,
+            key=lambda c: (
+                c.visual_distance is not None and c.visual_distance <= settings.visual_hash_max_distance,
+                c.visual_score * 0.65 + c.score * 100 * 0.35,
+            ),
+            reverse=True,
+        )[: budget.verify_pages]
         texts = await asyncio.gather(*[_fetch_page(c.url, client, sem) for c in ranked])
 
     verified: list[Candidate] = []
     for candidate, page_text in zip(ranked, texts):
-        snippet_score = overlap_score(query, f"{candidate.title} {candidate.snippet}")
-        page_score = overlap_score(query, page_text[:12000]) if page_text else 0.0
-        candidate.score = round((snippet_score * 0.35 + page_score * 0.65) * 100, 2)
+        snippet_score = overlap_score(query, f"{candidate.title} {candidate.snippet}") * 100.0
+        page_score = overlap_score(query, page_text[:12000]) * 100.0 if page_text else 0.0
+        text_score = snippet_score * 0.35 + page_score * 0.65
+        if candidate.visual_distance is not None:
+            if candidate.visual_distance <= settings.visual_hash_max_distance:
+                combined = candidate.visual_score * 0.72 + text_score * 0.28
+            else:
+                combined = candidate.visual_score * 0.35 + text_score * 0.65
+        else:
+            combined = text_score
+        candidate.score = round(min(100.0, combined), 2)
         candidate.summary = " ".join(page_text.split())[:700] if page_text else candidate.snippet[:700]
         verified.append(candidate)
 

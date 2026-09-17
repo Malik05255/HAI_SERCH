@@ -11,7 +11,14 @@ from sqlalchemy.orm import Session
 from .auth import Principal, create_pair_code, pair_device, register_device, require_principal
 from .config import settings
 from .database import Base, engine, get_db
-from .media import IMAGE_EXTS, VIDEO_EXTS, account_upload_root, delete_uploaded_media, resolve_upload_id
+from .media import (
+    IMAGE_EXTS,
+    VIDEO_EXTS,
+    account_upload_root,
+    delete_uploaded_media,
+    probe_uploaded_media,
+    resolve_upload_id,
+)
 from .models import Device, Job, Result
 from .queue import ACTIVE_STATES
 from .schemas import JobCreate, JobOut, ResultOut
@@ -20,7 +27,7 @@ from .schemas import JobCreate, JobOut, ResultOut
 CREATE_LOCK_KEY = 847251902
 FINAL_STATES = ("completed", "partial", "failed", "needs_context", "cancelled")
 CONTINUABLE_STATES = ("completed", "partial", "failed", "needs_context")
-app = FastAPI(title=settings.app_name, version="0.8.0")
+app = FastAPI(title=settings.app_name, version="0.9.0")
 
 
 class DeviceCreate(BaseModel):
@@ -174,37 +181,58 @@ def storage(principal: Principal = Depends(require_principal)) -> dict:
 
 @app.post("/v1/uploads")
 async def upload(file: UploadFile, principal: Principal = Depends(require_principal)) -> dict:
-    max_bytes = settings.video_max_upload_mb * 1024 * 1024
+    absolute_max_bytes = settings.video_max_upload_mb * 1024 * 1024
     snapshot = _storage_snapshot(principal.account_id)
     if snapshot["free_bytes"] <= 0:
         raise HTTPException(status_code=507, detail="cloud media storage is full")
 
-    suffix = Path(file.filename or "upload.bin").suffix.casefold()[:12]
-    key = f"{uuid4()}{suffix}"
+    supplied_suffix = Path(file.filename or "upload.bin").suffix.casefold()[:12]
+    key = f"{uuid4()}{supplied_suffix}"
     destination = account_upload_root(principal.account_id) / key
     written = 0
     try:
         with destination.open("wb") as output:
             while chunk := await file.read(1024 * 1024):
                 written += len(chunk)
-                if written > max_bytes:
+                if written > absolute_max_bytes:
                     raise HTTPException(status_code=413, detail="file too large")
                 if written > snapshot["free_bytes"]:
                     raise HTTPException(status_code=507, detail="cloud media storage quota exceeded")
                 output.write(chunk)
+
+        probe = probe_uploaded_media(destination)
+        if probe is None:
+            raise HTTPException(status_code=415, detail="unsupported or invalid media content")
+
+        if supplied_suffix in IMAGE_EXTS and probe.input_type != "image":
+            raise HTTPException(status_code=415, detail="file extension does not match media content")
+        if supplied_suffix in VIDEO_EXTS and probe.input_type != "video":
+            raise HTTPException(status_code=415, detail="file extension does not match media content")
+
+        if probe.input_type == "image":
+            image_limit = settings.image_max_upload_mb * 1024 * 1024
+            if written > image_limit:
+                raise HTTPException(status_code=413, detail="image file too large")
+            if probe.width * probe.height > settings.image_max_pixels:
+                raise HTTPException(status_code=413, detail="image dimensions too large")
+            final_suffix = supplied_suffix if supplied_suffix in IMAGE_EXTS else probe.canonical_suffix
+        else:
+            if probe.duration <= 0:
+                raise HTTPException(status_code=415, detail="invalid video duration")
+            if probe.duration > settings.video_max_duration_seconds:
+                raise HTTPException(status_code=413, detail="video is too long")
+            final_suffix = supplied_suffix if supplied_suffix in VIDEO_EXTS else probe.canonical_suffix
+
+        if destination.suffix.casefold() != final_suffix:
+            normalized = destination.with_suffix(final_suffix)
+            destination.rename(normalized)
+            destination = normalized
+            key = destination.name
     except Exception:
         destination.unlink(missing_ok=True)
         raise
 
-    content_type = file.content_type or ""
-    if content_type.startswith("video/") or suffix in VIDEO_EXTS:
-        input_type = "video"
-    elif content_type.startswith("image/") or suffix in IMAGE_EXTS:
-        input_type = "image"
-    else:
-        destination.unlink(missing_ok=True)
-        raise HTTPException(status_code=415, detail="unsupported media type")
-    return {"upload_id": key, "input_type": input_type, "size": written, "temporary": False}
+    return {"upload_id": key, "input_type": probe.input_type, "size": written, "temporary": False}
 
 
 @app.post("/v1/jobs", response_model=JobOut)
@@ -335,9 +363,6 @@ def continue_job(job_id: str, principal: Principal = Depends(require_principal),
         raise HTTPException(status_code=409, detail="cloud media is no longer available")
     _lock_capacity(db, principal.account_id)
 
-    # Continue is intentionally deeper than a fresh search. Keep existing
-    # results and resume from at least the configured expansion stage instead
-    # of replaying the first queries again.
     previous_attempts = job.attempts
     if previous_attempts >= settings.search_max_attempts:
         job.attempts = settings.search_continue_attempt_floor

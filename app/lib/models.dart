@@ -79,6 +79,7 @@ class SearchResult {
   bool get visionUsed => evidence['vision_used'] == true;
   bool get speechUsed => evidence['speech_used'] == true;
   bool get ocrUsed => evidence['ocr_used'] == true;
+  bool get pageVerified => evidence['verified_page'] == true;
   double get visualScore => (evidence['visual_score'] as num?)?.toDouble() ?? 0;
 
   String? get evidenceLabel {

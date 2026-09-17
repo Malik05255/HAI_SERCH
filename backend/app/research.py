@@ -15,6 +15,7 @@ from .egress import EgressRouter
 
 
 TOKEN_RE = re.compile(r"[\w\u0600-\u06ff]+", re.UNICODE)
+RESULT_IMAGE_MAX_BYTES = 6 * 1024 * 1024
 
 
 @dataclass
@@ -125,28 +126,61 @@ async def _fetch_page(url: str, egress: EgressRouter, sem: asyncio.Semaphore) ->
             return ""
 
 
-async def _image_phash(url: str | None, egress: EgressRouter, sem: asyncio.Semaphore) -> str:
+def _image_hash_variants(content: bytes) -> list[str]:
+    """Hash full image plus centered crops to tolerate thumbnail cropping/borders."""
+    try:
+        with Image.open(io.BytesIO(content)) as image:
+            image = image.convert("RGB")
+            width, height = image.size
+            variants = [image]
+            for ratio in (0.86, 0.72):
+                crop_w = max(16, int(width * ratio))
+                crop_h = max(16, int(height * ratio))
+                left = max(0, (width - crop_w) // 2)
+                top = max(0, (height - crop_h) // 2)
+                variants.append(image.crop((left, top, left + crop_w, top + crop_h)))
+
+            hashes: list[str] = []
+            for variant in variants:
+                value = str(imagehash.phash(variant))
+                if value not in hashes:
+                    hashes.append(value)
+            return hashes
+    except Exception:
+        return []
+
+
+async def _image_phashes(url: str | None, egress: EgressRouter, sem: asyncio.Semaphore) -> list[str]:
     if not url or not url.startswith(("http://", "https://")):
-        return ""
+        return []
     async with sem:
         try:
-            response = await egress.get(url)
+            response, content = await egress.get_bytes(url, max_bytes=RESULT_IMAGE_MAX_BYTES)
             content_type = response.headers.get("content-type", "")
-            if not content_type.startswith("image/") or len(response.content) > 6 * 1024 * 1024:
-                return ""
-            with Image.open(io.BytesIO(response.content)) as image:
-                return str(imagehash.phash(image.convert("RGB")))
+            if not content_type.startswith("image/") or not content:
+                return []
+            return _image_hash_variants(content)
         except Exception:
-            return ""
+            return []
 
 
-def _visual_match(reference_hashes: list[str], candidate_hash: str) -> tuple[float, int | None]:
-    if not reference_hashes or not candidate_hash:
+def _visual_match(
+    reference_hashes: list[str],
+    candidate_hashes: str | list[str],
+) -> tuple[float, int | None]:
+    if not reference_hashes:
         return 0.0, None
+    if isinstance(candidate_hashes, str):
+        candidate_values = [candidate_hashes] if candidate_hashes else []
+    else:
+        candidate_values = [value for value in candidate_hashes if value]
+    if not candidate_values:
+        return 0.0, None
+
     try:
-        candidate = imagehash.hex_to_hash(candidate_hash)
-        distances = [candidate - imagehash.hex_to_hash(value) for value in reference_hashes]
-        distance = min(distances)
+        references = [imagehash.hex_to_hash(value) for value in reference_hashes]
+        candidates = [imagehash.hex_to_hash(value) for value in candidate_values]
+        distance = min(candidate - reference for candidate in candidates for reference in references)
         score = max(0.0, 1.0 - distance / 64.0) * 100.0
         return round(score, 2), distance
     except Exception:
@@ -241,9 +275,9 @@ async def run_research(
             sem = asyncio.Semaphore(budget.http_concurrency)
 
             if reference_hashes:
-                image_hashes = await asyncio.gather(*[_image_phash(c.image_url, egress, sem) for c in prelim])
-                for candidate, fingerprint in zip(prelim, image_hashes):
-                    candidate.visual_score, candidate.visual_distance = _visual_match(reference_hashes, fingerprint)
+                image_hashes = await asyncio.gather(*[_image_phashes(c.image_url, egress, sem) for c in prelim])
+                for candidate, fingerprints in zip(prelim, image_hashes):
+                    candidate.visual_score, candidate.visual_distance = _visual_match(reference_hashes, fingerprints)
 
             ranked = sorted(
                 prelim,

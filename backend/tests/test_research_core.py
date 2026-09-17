@@ -9,6 +9,7 @@ from app.research import (
     _best_overlap,
     _candidate_from_item,
     _canonical_http_url,
+    _has_verifiable_evidence,
     _image_hash_variants,
     _preliminary_candidates,
     _visual_match,
@@ -273,3 +274,23 @@ def test_diverse_order_limits_duplicate_titles_and_domains_in_top_results() -> N
     assert len(titles) == len(set(titles))
     assert max(Counter(domains).values()) <= 2
     assert top[0].url == "https://example.com/a"
+
+
+def test_unverified_search_snippet_is_not_publishable_without_page_or_visual_match() -> None:
+    candidate = _candidate("snippet-only", 0.9)
+    candidate.visual_distance = None
+
+    assert _has_verifiable_evidence(candidate, "") is False
+
+
+def test_opened_source_page_is_verifiable_evidence() -> None:
+    candidate = _candidate("page-backed", 0.9)
+
+    assert _has_verifiable_evidence(candidate, "full extracted source page") is True
+
+
+def test_strong_visual_match_can_verify_when_source_page_is_blocked() -> None:
+    candidate = _candidate("visual-backed", 0.9, with_image=True)
+    candidate.visual_distance = 2
+
+    assert _has_verifiable_evidence(candidate, "") is True

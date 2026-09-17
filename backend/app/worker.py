@@ -1,5 +1,6 @@
 import asyncio
 import re
+import secrets
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -108,6 +109,18 @@ def _diverse_order(results: list[Result], target: int) -> list[Result]:
     return selected + deferred
 
 
+def _image_capability(existing_result: Result | None, candidate_image_url: str | None) -> str | None:
+    current = ""
+    if existing_result is not None and isinstance(existing_result.evidence, dict):
+        current = str(existing_result.evidence.get("image_proxy_token") or "").strip()
+    if current:
+        return current
+    image_url = (candidate_image_url or (existing_result.image_url if existing_result else None) or "").strip()
+    if not image_url.startswith(("http://", "https://")):
+        return None
+    return secrets.token_urlsafe(24)
+
+
 def process_one() -> bool:
     with SessionLocal() as db:
         job = claim_next_job(db)
@@ -159,6 +172,8 @@ def process_one() -> bool:
 
             existing = {r.url: r for r in db.scalars(select(Result).where(Result.job_id == job.id)).all()}
             for candidate in candidates:
+                current_result = existing.get(candidate.url)
+                image_proxy_token = _image_capability(current_result, candidate.image_url)
                 evidence = {
                     "verified_page": candidate.page_verified,
                     "attempt": job.attempts,
@@ -172,13 +187,22 @@ def process_one() -> bool:
                     "visual_match": candidate.visual_distance is not None
                     and candidate.visual_distance <= settings.visual_hash_max_distance,
                 }
-                if candidate.url in existing:
-                    result = existing[candidate.url]
-                    if candidate.score > result.match_score:
-                        result.match_score = candidate.score
-                        result.summary = candidate.summary
-                        result.evidence = evidence
+                if image_proxy_token:
+                    evidence["image_proxy_token"] = image_proxy_token
+
+                if current_result is not None:
+                    if candidate.image_url and not current_result.image_url:
+                        current_result.image_url = candidate.image_url
+                    if candidate.score > current_result.match_score:
+                        current_result.match_score = candidate.score
+                        current_result.summary = candidate.summary
+                        current_result.evidence = evidence
+                    elif image_proxy_token and not (current_result.evidence or {}).get("image_proxy_token"):
+                        preserved = dict(current_result.evidence or {})
+                        preserved["image_proxy_token"] = image_proxy_token
+                        current_result.evidence = preserved
                     continue
+
                 result = Result(
                     job_id=job.id,
                     title=candidate.title,

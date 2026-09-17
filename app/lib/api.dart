@@ -89,6 +89,12 @@ class ApiClient {
     _ensureOk(response);
   }
 
+  Future<Map<String, dynamic>> storageUsage() async {
+    final response = await http.get(Uri.parse('$baseUrl/v1/storage'), headers: await _headers());
+    _ensureOk(response);
+    return jsonDecode(response.body) as Map<String, dynamic>;
+  }
+
   Future<List<SearchJob>> listJobs({String view = 'all'}) async {
     final uri = Uri.parse('$baseUrl/v1/jobs').replace(queryParameters: {'view': view});
     final response = await http.get(uri, headers: await _headers());
@@ -166,6 +172,11 @@ class ApiClient {
       rethrow;
     }
     return target;
+  }
+
+  Future<void> deleteCloudMedia(String jobId) async {
+    final response = await http.delete(Uri.parse('$baseUrl/v1/jobs/$jobId/media'), headers: await _headers());
+    _ensureOk(response);
   }
 
   Future<void> deleteJob(String jobId) async {

@@ -7,6 +7,7 @@ from sqlalchemy import select
 from .budget import budget_for_job
 from .config import settings
 from .database import Base, SessionLocal, engine
+from .media import enrich_query
 from .models import Result
 from .queue import claim_next_job, requeue
 from .research import run_research
@@ -26,8 +27,15 @@ def process_one() -> bool:
             db.commit()
             return True
 
+        budget = budget_for_job(job.attempts - 1)
+        effective_query = enrich_query(job.query, job.input_url, job.input_type, budget.video_keyframes)
+        if not effective_query:
+            job.status = "needs_context"
+            db.commit()
+            return True
+
         try:
-            candidates = asyncio.run(run_research(job.query, job.attempts - 1, budget_for_job(job.attempts - 1)))
+            candidates = asyncio.run(run_research(effective_query, job.attempts - 1, budget))
             existing = {r.url: r for r in db.scalars(select(Result).where(Result.job_id == job.id)).all()}
             for candidate in candidates:
                 if candidate.url in existing:
@@ -43,7 +51,11 @@ def process_one() -> bool:
                     image_url=candidate.image_url,
                     summary=candidate.summary,
                     match_score=candidate.score,
-                    evidence={"verified_page": bool(candidate.summary), "attempt": job.attempts},
+                    evidence={
+                        "verified_page": bool(candidate.summary),
+                        "attempt": job.attempts,
+                        "media_enriched": effective_query != job.query,
+                    },
                 )
                 db.add(result)
                 existing[candidate.url] = result

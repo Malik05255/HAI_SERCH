@@ -11,6 +11,8 @@ from .models import Job, Result
 from .schemas import JobCreate, JobOut, ResultOut
 
 
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
+VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v"}
 app = FastAPI(title=settings.app_name, version="0.1.0")
 
 
@@ -35,7 +37,7 @@ def health() -> dict:
 @app.post("/v1/uploads", dependencies=[Depends(require_api_key)])
 async def upload(file: UploadFile) -> dict:
     max_bytes = settings.video_max_upload_mb * 1024 * 1024
-    suffix = Path(file.filename or "upload.bin").suffix[:12]
+    suffix = Path(file.filename or "upload.bin").suffix.casefold()[:12]
     key = f"{uuid4()}{suffix}"
     destination = Path(settings.data_dir, "uploads", key)
     written = 0
@@ -51,7 +53,13 @@ async def upload(file: UploadFile) -> dict:
         raise
 
     content_type = file.content_type or ""
-    input_type = "video" if content_type.startswith("video/") else "image" if content_type.startswith("image/") else "file"
+    if content_type.startswith("video/") or suffix in VIDEO_EXTS:
+        input_type = "video"
+    elif content_type.startswith("image/") or suffix in IMAGE_EXTS:
+        input_type = "image"
+    else:
+        destination.unlink(missing_ok=True)
+        raise HTTPException(status_code=415, detail="unsupported media type")
     return {"input_url": str(destination), "input_type": input_type, "size": written}
 
 

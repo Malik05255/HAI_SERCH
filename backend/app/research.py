@@ -16,7 +16,7 @@ from .egress import EgressRouter
 
 
 TOKEN_RE = re.compile(r"[\w\u0600-\u06ff]+", re.UNICODE)
-SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?؟。！？])\\s+|\\n+")
+SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?؟。！？])\s+|\n+")
 RESULT_IMAGE_MAX_BYTES = 6 * 1024 * 1024
 TRACKING_QUERY_KEYS = {"fbclid", "gclid", "dclid", "mc_cid", "mc_eid"}
 SEARCH_CACHE_TTL_SECONDS = 20 * 60

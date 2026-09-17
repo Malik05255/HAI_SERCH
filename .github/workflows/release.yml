@@ -19,7 +19,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: subosito/flutter-action@v2
         with:
+          flutter-version: "3.47.4"
           channel: stable
+          cache: true
       - run: flutter create --platforms=android --org com.hai --project-name deep_search .
         working-directory: app
       - name: Restore Android signing key
@@ -33,6 +35,9 @@ jobs:
       - run: python scripts/generate_icon.py
       - run: flutter pub get
         working-directory: app
+      - name: Run Flutter tests
+        working-directory: app
+        run: flutter test
       - name: Build APK
         working-directory: app
         run: |
@@ -53,7 +58,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: subosito/flutter-action@v2
         with:
+          flutter-version: "3.47.4"
           channel: stable
+          cache: true
       - run: flutter create --platforms=windows --project-name deep_search .
         working-directory: app
       - run: python -m pip install pillow

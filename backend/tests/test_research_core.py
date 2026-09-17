@@ -2,7 +2,7 @@ from collections import Counter
 
 from app.models import Result
 from app.research import _best_overlap, _visual_match, make_queries, overlap_score
-from app.worker import _diverse_order
+from app.worker import _diverse_order, _safe_error
 
 
 def _result(title: str, url: str, score: float) -> Result:
@@ -49,6 +49,16 @@ def test_visual_hash_exact_match_scores_maximum() -> None:
     score, distance = _visual_match(["0000000000000000"], "0000000000000000")
     assert distance == 0
     assert score == 100.0
+
+
+def test_safe_error_redacts_url_credentials_and_limits_output() -> None:
+    error = RuntimeError("request failed at https://alice:supersecret@example.com/private " + "x" * 500)
+    rendered = _safe_error(error)
+
+    assert "supersecret" not in rendered
+    assert "alice" not in rendered
+    assert "https://***@example.com/private" in rendered
+    assert len(rendered) <= 300
 
 
 def test_diverse_order_limits_duplicate_titles_and_domains_in_top_results() -> None:

@@ -24,6 +24,7 @@ jobs:
           channel: stable
       - run: flutter create --platforms=android --project-name deep_search .
         working-directory: app
+      - run: python scripts/prepare_platforms.py
       - run: flutter pub get
         working-directory: app
       - run: flutter analyze --no-fatal-infos
@@ -41,6 +42,7 @@ jobs:
           channel: stable
       - run: flutter create --platforms=windows --project-name deep_search .
         working-directory: app
+      - run: python scripts/prepare_platforms.py
       - run: flutter pub get
         working-directory: app
       - name: Build Windows debug

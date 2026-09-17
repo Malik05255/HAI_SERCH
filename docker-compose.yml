@@ -23,6 +23,24 @@ services:
       - "127.0.0.1:8080:8080"
     mem_limit: 768m
 
+  vision:
+    image: ghcr.io/ggml-org/llama.cpp:server
+    restart: unless-stopped
+    command:
+      - -hf
+      - ggml-org/SmolVLM-256M-Instruct-GGUF:Q8_0
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8081"
+      - -c
+      - "2048"
+      - -np
+      - "1"
+    volumes:
+      - vision_cache:/root/.cache
+    mem_limit: 1200m
+
   api:
     build: ./backend
     restart: unless-stopped
@@ -48,7 +66,10 @@ services:
         condition: service_healthy
       searxng:
         condition: service_started
+      vision:
+        condition: service_started
     mem_limit: 3g
 
 volumes:
   pgdata:
+  vision_cache:

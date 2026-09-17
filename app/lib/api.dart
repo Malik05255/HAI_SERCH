@@ -333,48 +333,45 @@ class ApiClient {
   }
 
   Future<File> downloadMedia(String jobId, Directory directory) async {
-    for (var attempt = 0; attempt < 2; attempt++) {
-      await init();
-      final client = http.Client();
-      try {
-        final request = http.Request('GET', Uri.parse('$baseUrl/v1/jobs/$jobId/media'));
-        request.headers['Authorization'] = 'Bearer $_token';
-        final response = await client.send(request);
+    await init();
+    final client = http.Client();
+    try {
+      final request = http.Request('GET', Uri.parse('$baseUrl/v1/jobs/$jobId/media'));
+      request.headers['Authorization'] = 'Bearer $_token';
+      final response = await client.send(request);
 
-        if (response.statusCode == 401) {
-          await response.stream.drain<void>();
-          await _markAuthRevoked();
-          throw StateError('device authorization revoked');
-        }
-        if (response.statusCode < 200 || response.statusCode >= 300) {
-          final body = await response.stream.bytesToString();
-          throw Exception('HTTP ${response.statusCode}: $body');
-        }
-
-        var extension = '';
-        final disposition = response.headers['content-disposition'] ?? '';
-        final filenameMatch = RegExp(r'filename="?([^";]+)').firstMatch(disposition);
-        final filename = filenameMatch?.group(1) ?? '';
-        final dot = filename.lastIndexOf('.');
-        if (dot >= 0 && filename.length - dot <= 12) {
-          extension = filename.substring(dot).toLowerCase();
-        }
-
-        final target = File('${directory.path}${Platform.pathSeparator}source$extension');
-        final sink = target.openWrite();
-        try {
-          await response.stream.pipe(sink);
-        } catch (_) {
-          await sink.close();
-          if (await target.exists()) await target.delete();
-          rethrow;
-        }
-        return target;
-      } finally {
-        client.close();
+      if (response.statusCode == 401) {
+        await response.stream.drain<void>();
+        await _markAuthRevoked();
+        throw StateError('device authorization revoked');
       }
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        final body = await response.stream.bytesToString();
+        throw Exception('HTTP ${response.statusCode}: $body');
+      }
+
+      var extension = '';
+      final disposition = response.headers['content-disposition'] ?? '';
+      final filenameMatch = RegExp(r'filename="?([^";]+)').firstMatch(disposition);
+      final filename = filenameMatch?.group(1) ?? '';
+      final dot = filename.lastIndexOf('.');
+      if (dot >= 0 && filename.length - dot <= 12) {
+        extension = filename.substring(dot).toLowerCase();
+      }
+
+      final target = File('${directory.path}${Platform.pathSeparator}source$extension');
+      final sink = target.openWrite();
+      try {
+        await response.stream.pipe(sink);
+      } catch (_) {
+        await sink.close();
+        if (await target.exists()) await target.delete();
+        rethrow;
+      }
+      return target;
+    } finally {
+      client.close();
     }
-    throw Exception('authentication failed');
   }
 
   Future<void> deleteCloudMedia(String jobId) async {

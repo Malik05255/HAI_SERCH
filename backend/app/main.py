@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -27,7 +28,16 @@ from .schemas import JobCreate, JobOut, ResultOut
 CREATE_LOCK_KEY = 847251902
 FINAL_STATES = ("completed", "partial", "failed", "needs_context", "cancelled")
 CONTINUABLE_STATES = ("completed", "partial", "failed", "needs_context")
-app = FastAPI(title=settings.app_name, version="0.10.0")
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    Path(settings.data_dir, "uploads").mkdir(parents=True, exist_ok=True)
+    ensure_schema()
+    yield
+
+
+app = FastAPI(title=settings.app_name, version="0.10.0", lifespan=lifespan)
 
 
 class DeviceCreate(BaseModel):
@@ -37,12 +47,6 @@ class DeviceCreate(BaseModel):
 class PairDevice(BaseModel):
     code: str = Field(min_length=6, max_length=20)
     name: str = Field(default="Device", min_length=1, max_length=120)
-
-
-@app.on_event("startup")
-def startup() -> None:
-    Path(settings.data_dir, "uploads").mkdir(parents=True, exist_ok=True)
-    ensure_schema()
 
 
 def _queue_positions(db: Session, account_id: str) -> dict[str, int]:

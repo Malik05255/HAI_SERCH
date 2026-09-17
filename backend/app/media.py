@@ -188,8 +188,39 @@ def _vision_describe(path: Path) -> str:
         return ""
 
 
+def _video_duration(path: Path) -> float:
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        duration = float(result.stdout.strip())
+        return duration if duration > 0 else 0.0
+    except Exception:
+        return 0.0
+
+
 def _extract_video_frames(path: Path, directory: Path, max_frames: int) -> list[Path]:
     pattern = str(directory / "frame-%02d.jpg")
+    duration = _video_duration(path)
+    # Uniformly sample the complete clip. Short clips therefore get multiple
+    # useful frames instead of only one frame from a fixed 12-second interval.
+    if duration > 0 and max_frames > 0:
+        interval = max(0.45, duration / max_frames)
+    else:
+        interval = 12.0
     try:
         subprocess.run(
             [
@@ -199,7 +230,7 @@ def _extract_video_frames(path: Path, directory: Path, max_frames: int) -> list[
                 "-i",
                 str(path),
                 "-vf",
-                "fps=1/12,scale=1280:-2:force_original_aspect_ratio=decrease",
+                f"fps=1/{interval:.3f},scale=1280:-2:force_original_aspect_ratio=decrease",
                 "-frames:v",
                 str(max_frames),
                 "-q:v",

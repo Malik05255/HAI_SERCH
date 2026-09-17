@@ -29,6 +29,14 @@ int compareVersions(String a, String b) {
   return 0;
 }
 
+List<String> windowsInstallerArguments() => const [
+      '/SILENT',
+      '/CLOSEAPPLICATIONS',
+      '/RESTARTAPPLICATIONS',
+      '/NORESTART',
+      '/SUPPRESSMSGBOXES',
+    ];
+
 class UpdateInfo {
   const UpdateInfo({
     required this.version,
@@ -142,7 +150,7 @@ class UpdateService {
     if (Platform.isWindows) {
       await Process.start(
         target.path,
-        const ['/CLOSEAPPLICATIONS'],
+        windowsInstallerArguments(),
         mode: ProcessStartMode.detached,
       );
     } else if (Platform.isAndroid) {

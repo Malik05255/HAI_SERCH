@@ -1,6 +1,7 @@
 import asyncio
 import io
 import re
+import time
 from dataclasses import dataclass
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
@@ -17,6 +18,39 @@ from .egress import EgressRouter
 TOKEN_RE = re.compile(r"[\w\u0600-\u06ff]+", re.UNICODE)
 RESULT_IMAGE_MAX_BYTES = 6 * 1024 * 1024
 TRACKING_QUERY_KEYS = {"fbclid", "gclid", "dclid", "mc_cid", "mc_eid"}
+SEARCH_CACHE_TTL_SECONDS = 20 * 60
+PAGE_CACHE_TTL_SECONDS = 6 * 60 * 60
+IMAGE_CACHE_TTL_SECONDS = 6 * 60 * 60
+SEARCH_CACHE_MAX_ENTRIES = 256
+PAGE_CACHE_MAX_ENTRIES = 512
+IMAGE_CACHE_MAX_ENTRIES = 512
+
+_search_cache: dict[tuple[str, int, str], tuple[float, object]] = {}
+_page_cache: dict[str, tuple[float, object]] = {}
+_image_cache: dict[str, tuple[float, object]] = {}
+
+
+def _cache_get(cache: dict, key, ttl_seconds: int, *, now: float | None = None):
+    entry = cache.get(key)
+    if entry is None:
+        return None
+    current = time.monotonic() if now is None else now
+    created_at, value = entry
+    if current - created_at > ttl_seconds:
+        cache.pop(key, None)
+        return None
+    # Dict insertion order gives us a tiny dependency-free LRU.
+    cache.pop(key, None)
+    cache[key] = entry
+    return value
+
+
+def _cache_put(cache: dict, key, value, max_entries: int, *, now: float | None = None) -> None:
+    current = time.monotonic() if now is None else now
+    cache.pop(key, None)
+    cache[key] = (current, value)
+    while len(cache) > max_entries:
+        cache.pop(next(iter(cache)))
 
 
 @dataclass
@@ -131,6 +165,11 @@ async def _searx(
     client: httpx.AsyncClient,
     categories: str | None = None,
 ) -> list[dict]:
+    cache_key = (query.casefold(), page, categories or "")
+    cached = _cache_get(_search_cache, cache_key, SEARCH_CACHE_TTL_SECONDS)
+    if cached is not None:
+        return cached
+
     params = {"q": query, "format": "json", "language": "all", "pageno": page}
     if categories:
         params["categories"] = categories
@@ -139,18 +178,26 @@ async def _searx(
         params=params,
     )
     response.raise_for_status()
-    return response.json().get("results", [])
+    results = response.json().get("results", [])
+    _cache_put(_search_cache, cache_key, results, SEARCH_CACHE_MAX_ENTRIES)
+    return results
 
 
 async def _fetch_page(url: str, egress: EgressRouter, sem: asyncio.Semaphore) -> str:
+    cached = _cache_get(_page_cache, url, PAGE_CACHE_TTL_SECONDS)
+    if cached is not None:
+        return cached
+
     async with sem:
         try:
             response = await egress.get(url)
             content_type = response.headers.get("content-type", "")
             if "text/html" not in content_type and "text/plain" not in content_type:
                 return ""
-            extracted = trafilatura.extract(response.text, include_comments=False, include_tables=False)
-            return extracted or ""
+            extracted = trafilatura.extract(response.text, include_comments=False, include_tables=False) or ""
+            if extracted:
+                _cache_put(_page_cache, url, extracted, PAGE_CACHE_MAX_ENTRIES)
+            return extracted
         except Exception:
             return ""
 
@@ -182,13 +229,20 @@ def _image_hash_variants(content: bytes) -> list[str]:
 async def _image_phashes(url: str | None, egress: EgressRouter, sem: asyncio.Semaphore) -> list[str]:
     if not url or not url.startswith(("http://", "https://")):
         return []
+    cached = _cache_get(_image_cache, url, IMAGE_CACHE_TTL_SECONDS)
+    if cached is not None:
+        return cached
+
     async with sem:
         try:
             response, content = await egress.get_bytes(url, max_bytes=RESULT_IMAGE_MAX_BYTES)
             content_type = response.headers.get("content-type", "")
             if not content_type.startswith("image/") or not content:
                 return []
-            return _image_hash_variants(content)
+            hashes = _image_hash_variants(content)
+            if hashes:
+                _cache_put(_image_cache, url, hashes, IMAGE_CACHE_MAX_ENTRIES)
+            return hashes
         except Exception:
             return []
 

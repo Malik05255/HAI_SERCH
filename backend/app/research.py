@@ -70,8 +70,6 @@ def make_queries(query: str, attempt: int, planned_queries: list[str] | None = N
     base = chunks[0] if chunks else query.strip()
     queries = list(planned_queries or []) + list(chunks)
 
-    # Exact evidence phrases are valuable for dialogue/subtitles/OCR. Keep them
-    # as additional queries rather than replacing broader semantic searches.
     for chunk in chunks:
         if 8 <= len(chunk) <= 180:
             queries.append(f'"{chunk}"')
@@ -189,26 +187,25 @@ async def run_research(
     timeout = httpx.Timeout(settings.search_http_timeout_seconds)
     headers = {"User-Agent": "DeepSearch/0.6 (+personal research assistant)"}
 
-    # SearXNG is an internal Docker service and must always remain direct from
-    # the worker. With the VPN overlay, SearXNG itself proxies its engine traffic.
     async with httpx.AsyncClient(timeout=timeout, headers=headers, follow_redirects=True) as search_client:
         async with EgressRouter(timeout=timeout, headers=headers) as egress:
             raw: dict[str, Candidate] = {}
             page = min(5, 1 + attempt // 3)
             queries = make_queries(query, attempt, planned_queries=planned_queries)
+            successful_search_requests = 0
 
             for query_index, search_query in enumerate(queries):
                 batches: list[list[dict]] = []
                 try:
                     batches.append(await _searx(search_query, page, search_client))
+                    successful_search_requests += 1
                 except Exception:
                     pass
 
-                # Media searches additionally query image engines. Limit image-engine
-                # expansion to the first few query variants to protect the free VM.
                 if reference_hashes and query_index < 6:
                     try:
                         batches.append(await _searx(search_query, min(page, 2), search_client, categories="images"))
+                        successful_search_requests += 1
                     except Exception:
                         pass
 
@@ -236,6 +233,9 @@ async def run_research(
                         break
                 if len(raw) >= budget.max_candidates:
                     break
+
+            if queries and successful_search_requests == 0:
+                raise RuntimeError("search_backend_unavailable")
 
             prelim = sorted(raw.values(), key=lambda c: c.score, reverse=True)[: max(budget.verify_pages * 2, budget.verify_pages)]
             sem = asyncio.Semaphore(budget.http_concurrency)

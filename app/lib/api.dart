@@ -9,7 +9,9 @@ import 'models.dart';
 import 'notification_service.dart';
 
 class ApiClient {
-  ApiClient();
+  ApiClient({this.enableRealtime = true});
+
+  final bool enableRealtime;
 
   static const String baseUrl = String.fromEnvironment(
     'API_BASE_URL',
@@ -62,7 +64,7 @@ class ApiClient {
     }
     _initialized = true;
     await NotificationService.initialize();
-    unawaited(_ensureRealtime());
+    if (enableRealtime) unawaited(_ensureRealtime());
   }
 
   Future<void> _register() async {
@@ -101,6 +103,7 @@ class ApiClient {
     _initialized = false;
     await _storage.delete(key: _tokenKey);
     await _storage.delete(key: _deviceIdKey);
+    if (!_jobChanges.isClosed) _jobChanges.add(null);
   }
 
   Future<void> _stopRealtime() async {
@@ -118,7 +121,9 @@ class ApiClient {
   }
 
   void _scheduleRealtimeReconnect() {
-    if (!_initialized || _authRevoked || _realtimeUnauthorized || _reconnectTimer?.isActive == true) return;
+    if (!enableRealtime || !_initialized || _authRevoked || _realtimeUnauthorized || _reconnectTimer?.isActive == true) {
+      return;
+    }
     _reconnectTimer = Timer(const Duration(seconds: 3), () {
       _reconnectTimer = null;
       unawaited(_ensureRealtime());
@@ -136,7 +141,8 @@ class ApiClient {
   }
 
   Future<void> _ensureRealtime() async {
-    if (!_initialized ||
+    if (!enableRealtime ||
+        !_initialized ||
         _authRevoked ||
         _realtimeUnauthorized ||
         _connectingRealtime ||
@@ -226,7 +232,7 @@ class ApiClient {
     _ensureOk(response);
     await _saveAuth(jsonDecode(response.body) as Map<String, dynamic>);
     _initialized = true;
-    unawaited(_ensureRealtime());
+    if (enableRealtime) unawaited(_ensureRealtime());
   }
 
   Future<Map<String, dynamic>> createPairCode() async {
@@ -288,6 +294,19 @@ class ApiClient {
     );
     _ensureOk(response);
     return SearchJob.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
+  }
+
+  Future<void> addClue(String jobId, String text) async {
+    final clue = text.trim();
+    if (clue.isEmpty) return;
+    final response = await _authorized(
+      (headers) => http.post(
+        Uri.parse('$baseUrl/v1/jobs/$jobId/clues'),
+        headers: headers,
+        body: jsonEncode({'text': clue}),
+      ),
+    );
+    _ensureOk(response);
   }
 
   Future<http.Response> _uploadOnce(String path) async {

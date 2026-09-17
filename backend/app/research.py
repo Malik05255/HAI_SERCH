@@ -270,7 +270,7 @@ async def run_research(
         candidate.score = round(min(100.0, combined), 2)
         candidate.page_verified = bool(page_text)
         candidate.summary = " ".join(page_text.split())[:700] if page_text else candidate.snippet[:700]
-        if candidate.score > 0:
+        if candidate.score >= settings.search_min_result_score:
             verified.append(candidate)
 
     return sorted(verified, key=lambda c: c.score, reverse=True)

@@ -11,7 +11,7 @@ from .notifications import send_job_pushes
 from .worker import process_one
 
 
-CLEANUP_INTERVAL_SECONDS = 3600
+CLEANUP_INTERVAL_SECONDS = 15 * 60
 NOTIFICATION_RETRY_INTERVAL_SECONDS = 30
 
 

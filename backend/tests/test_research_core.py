@@ -2,7 +2,7 @@ from collections import Counter
 
 from app.models import Result
 from app.research import _best_overlap, _visual_match, make_queries, overlap_score
-from app.worker import _diverse_order, _safe_error
+from app.worker import _diverse_order, _image_capability, _safe_error
 
 
 def _result(title: str, url: str, score: float) -> Result:
@@ -59,6 +59,26 @@ def test_safe_error_redacts_url_credentials_and_limits_output() -> None:
     assert "alice" not in rendered
     assert "https://***@example.com/private" in rendered
     assert len(rendered) <= 300
+
+
+def test_image_capability_is_random_only_for_public_result_images() -> None:
+    first = _image_capability(None, "https://images.example/poster.jpg")
+    second = _image_capability(None, "https://images.example/poster.jpg")
+
+    assert first
+    assert second
+    assert first != second
+    assert len(first) >= 24
+    assert _image_capability(None, None) is None
+    assert _image_capability(None, "file:///tmp/poster.jpg") is None
+
+
+def test_image_capability_preserves_existing_token() -> None:
+    result = _result("Movie", "https://example.com/movie", 91)
+    result.image_url = "https://images.example/poster.jpg"
+    result.evidence = {"image_proxy_token": "existing-capability-token-12345"}
+
+    assert _image_capability(result, "https://other.example/new.jpg") == "existing-capability-token-12345"
 
 
 def test_diverse_order_limits_duplicate_titles_and_domains_in_top_results() -> None:

@@ -12,7 +12,7 @@ from .budget import budget_for_job
 from .config import settings
 from .database import SessionLocal, ensure_schema
 from .media import delete_uploaded_media, media_features
-from .models import Result
+from .models import Job, Result
 from .planner import plan_queries
 from .queue import claim_next_job, requeue
 from .research import run_research
@@ -33,6 +33,14 @@ def _safe_error(error: Exception) -> str:
     if not detail:
         return name[:300]
     return f"{name}: {detail}"[:300]
+
+
+def _reload_job(db, job_id: str) -> Job | None:
+    return db.scalar(
+        select(Job)
+        .where(Job.id == job_id)
+        .execution_options(populate_existing=True)
+    )
 
 
 def purge_job_media(job) -> None:
@@ -126,32 +134,48 @@ def process_one() -> bool:
         job = claim_next_job(db)
         if job is None:
             return False
-        if job.stop_requested:
-            finish_job(db, job, "stopped")
-            return True
-
-        budget = budget_for_job(job.attempts - 1)
-        features = media_features(job.input_url, job.input_type, budget.video_keyframes)
-
-        if job.input_type in {"image", "video"} and settings.vision_enabled and not features.get("vision"):
-            job.last_error = "visual_analysis_unavailable"
-            if job.attempts >= settings.search_max_attempts:
-                finish_job(db, job, "failed")
-            else:
-                db.commit()
-                requeue(db, job)
-            return True
-
-        effective_query = _effective_query(job, features)
-        hashes = list(features.get("hashes", []))
-        if not effective_query:
-            job.last_error = "insufficient_context"
-            finish_job(db, job, "needs_context")
-            return True
-
-        planned_queries = plan_queries(effective_query)
+        job_id = job.id
 
         try:
+            if job.stop_requested:
+                finish_job(db, job, "stopped")
+                return True
+
+            budget = budget_for_job(job.attempts - 1)
+            features = media_features(job.input_url, job.input_type, budget.video_keyframes)
+
+            # Media analysis may take minutes. Re-read the row so a concurrent
+            # cancel/delete is observed before any state is committed.
+            current = _reload_job(db, job_id)
+            if current is None:
+                db.rollback()
+                return True
+            job = current
+            if job.status == "cancelled":
+                purge_job_media(job)
+                db.commit()
+                return True
+            if job.stop_requested:
+                finish_job(db, job, "stopped")
+                return True
+
+            if job.input_type in {"image", "video"} and settings.vision_enabled and not features.get("vision"):
+                job.last_error = "visual_analysis_unavailable"
+                if job.attempts >= settings.search_max_attempts:
+                    finish_job(db, job, "failed")
+                else:
+                    db.commit()
+                    requeue(db, job)
+                return True
+
+            effective_query = _effective_query(job, features)
+            hashes = list(features.get("hashes", []))
+            if not effective_query:
+                job.last_error = "insufficient_context"
+                finish_job(db, job, "needs_context")
+                return True
+
+            planned_queries = plan_queries(effective_query)
             candidates = asyncio.run(
                 run_research(
                     effective_query,
@@ -161,7 +185,12 @@ def process_one() -> bool:
                     planned_queries=planned_queries,
                 )
             )
-            db.refresh(job)
+
+            current = _reload_job(db, job_id)
+            if current is None:
+                db.rollback()
+                return True
+            job = current
             if job.status == "cancelled":
                 purge_job_media(job)
                 db.commit()
@@ -247,7 +276,14 @@ def process_one() -> bool:
                 db.commit()
                 requeue(db, job)
         except Exception as error:
-            db.refresh(job)
+            # Roll back first: a flush/commit failure can leave the SQLAlchemy
+            # session unusable. Then re-read from PostgreSQL instead of touching
+            # a stale ORM object that may have been deleted concurrently.
+            db.rollback()
+            current = _reload_job(db, job_id)
+            if current is None:
+                return True
+            job = current
             job.last_error = _safe_error(error)
             if job.status == "cancelled":
                 purge_job_media(job)

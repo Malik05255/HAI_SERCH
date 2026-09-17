@@ -43,9 +43,9 @@ def overlap_score(query: str, text: str) -> float:
 
 def _query_chunks(text: str) -> list[str]:
     clean = " ".join(text.split())
-    if len(clean) <= 360:
+    if len(clean) <= 220:
         return [clean]
-    size = 300
+    size = 180
     chunks = [clean[:size], clean[-size:]]
     middle = max(0, len(clean) // 2 - size // 2)
     chunks.append(clean[middle : middle + size])
@@ -58,12 +58,16 @@ def _query_chunks(text: str) -> list[str]:
     return unique
 
 
-def make_queries(query: str, attempt: int) -> list[str]:
+def make_queries(query: str, attempt: int, planned_queries: list[str] | None = None) -> list[str]:
     chunks = _query_chunks(query)
     base = chunks[0] if chunks else query.strip()
-    queries = list(chunks)
-    if len(base) < 180:
-        queries.append(f'"{base}"')
+    queries = list(planned_queries or []) + list(chunks)
+
+    # Exact evidence phrases are valuable for dialogue/subtitles/OCR. Keep them
+    # as additional queries rather than replacing broader semantic searches.
+    for chunk in chunks:
+        if 8 <= len(chunk) <= 180:
+            queries.append(f'"{chunk}"')
 
     lowered = query.casefold()
     if any(x in lowered for x in ("فيلم", "مسلسل", "movie", "film", "series")):
@@ -79,8 +83,9 @@ def make_queries(query: str, attempt: int) -> list[str]:
     unique: list[str] = []
     for item in queries:
         item = " ".join(item.split())[:500]
-        if item and item not in seen:
-            seen.add(item)
+        key = item.casefold()
+        if item and key not in seen:
+            seen.add(key)
             unique.append(item)
     return unique
 
@@ -171,17 +176,19 @@ async def run_research(
     attempt: int,
     budget: ResearchBudget,
     reference_hashes: list[str] | None = None,
+    planned_queries: list[str] | None = None,
 ) -> list[Candidate]:
     reference_hashes = reference_hashes or []
     timeout = httpx.Timeout(settings.search_http_timeout_seconds)
-    headers = {"User-Agent": "DeepSearch/0.4 (+personal research assistant)"}
+    headers = {"User-Agent": "DeepSearch/0.5 (+personal research assistant)"}
 
-    # SearXNG is an internal Docker service and must always remain direct.
+    # SearXNG is an internal Docker service and must always remain direct from
+    # the worker. With the VPN overlay, SearXNG itself proxies its engine traffic.
     async with httpx.AsyncClient(timeout=timeout, headers=headers, follow_redirects=True) as search_client:
         async with EgressRouter(timeout=timeout, headers=headers) as egress:
             raw: dict[str, Candidate] = {}
             page = min(5, 1 + attempt // 3)
-            queries = make_queries(query, attempt)
+            queries = make_queries(query, attempt, planned_queries=planned_queries)
 
             for query_index, search_query in enumerate(queries):
                 batches: list[list[dict]] = []
@@ -192,7 +199,7 @@ async def run_research(
 
                 # Media searches additionally query image engines. Limit image-engine
                 # expansion to the first few query variants to protect the free VM.
-                if reference_hashes and query_index < 4:
+                if reference_hashes and query_index < 6:
                     try:
                         batches.append(await _searx(search_query, min(page, 2), search_client, categories="images"))
                     except Exception:

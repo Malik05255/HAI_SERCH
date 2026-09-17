@@ -55,7 +55,12 @@ class SearchJob {
       : query.trim();
 
   bool get isActive => const {'queued', 'running', 'stopped'}.contains(status);
-  bool get canContinue => const {'completed', 'partial', 'failed', 'needs_context'}.contains(status);
+  bool get canContinue {
+    if (!const {'completed', 'partial', 'failed', 'needs_context'}.contains(status)) {
+      return false;
+    }
+    return inputType == 'text' || mediaAvailable;
+  }
 
   String? get userErrorLabel {
     if (lastError == null) return null;

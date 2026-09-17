@@ -60,13 +60,6 @@ class LocalArchiveStore {
     return dir;
   }
 
-  Future<Directory> _pendingRoot() async {
-    final root = await _root();
-    final dir = Directory('${root.path}${Platform.pathSeparator}pending');
-    await dir.create(recursive: true);
-    return dir;
-  }
-
   Future<Directory> _archiveRoot() async {
     final root = await _root();
     final dir = Directory('${root.path}${Platform.pathSeparator}archive');
@@ -74,84 +67,52 @@ class LocalArchiveStore {
     return dir;
   }
 
-  String _extension(String name) {
-    final index = name.lastIndexOf('.');
-    if (index < 0 || index == name.length - 1) return '';
-    final value = name.substring(index).toLowerCase();
-    return value.length <= 10 ? value : '';
-  }
+  // Kept for client compatibility. Source media is intentionally not copied
+  // into app storage at upload time; cloud storage is the shared source until
+  // the user explicitly archives the task on a device.
+  Future<void> rememberSource(String jobId, String sourcePath, String originalName) async {}
 
-  Future<void> rememberSource(String jobId, String sourcePath, String originalName) async {
-    final source = File(sourcePath);
-    if (!await source.exists()) return;
-    final root = await _pendingRoot();
-    final dir = Directory('${root.path}${Platform.pathSeparator}$jobId');
-    await dir.create(recursive: true);
-    final ext = _extension(originalName.isEmpty ? source.path : originalName);
-    final target = File('${dir.path}${Platform.pathSeparator}source$ext');
-    await source.copy(target.path);
-    await File('${dir.path}${Platform.pathSeparator}media.json').writeAsString(
-      jsonEncode({'name': originalName, 'file': target.uri.pathSegments.last}),
-      flush: true,
-    );
-  }
-
-  Future<({File? file, String? name})> _pendingMedia(String jobId) async {
-    final root = await _pendingRoot();
-    final dir = Directory('${root.path}${Platform.pathSeparator}$jobId');
-    if (!await dir.exists()) return (file: null, name: null);
-    String? name;
-    final meta = File('${dir.path}${Platform.pathSeparator}media.json');
-    if (await meta.exists()) {
-      try {
-        final data = jsonDecode(await meta.readAsString()) as Map<String, dynamic>;
-        name = data['name'] as String?;
-      } catch (_) {}
-    }
-    final files = await dir.list().where((e) => e is File && !e.path.endsWith('media.json')).cast<File>().toList();
-    return (file: files.isEmpty ? null : files.first, name: name);
-  }
-
-  Future<bool> hasPendingMedia(String jobId) async {
-    final pending = await _pendingMedia(jobId);
-    if (pending.file != null && await pending.file!.exists()) return true;
-    // A linked device may not have a local pending copy; archiveJob can fetch it from cloud.
-    return true;
-  }
+  Future<bool> hasPendingMedia(String jobId) async => false;
 
   Future<void> archiveJob(SearchJob job, List<SearchResult> results) async {
-    final pending = await _pendingMedia(job.id);
     final root = await _archiveRoot();
     final dir = Directory('${root.path}${Platform.pathSeparator}${job.id}');
+
+    // Build archives atomically enough for user-facing behavior: remove any
+    // incomplete previous attempt, recreate the folder, then write metadata last.
+    if (await dir.exists()) await dir.delete(recursive: true);
     await dir.create(recursive: true);
 
     String? mediaFileName;
-    String? mediaName = pending.name;
-    if (pending.file != null && await pending.file!.exists()) {
-      mediaFileName = pending.file!.uri.pathSegments.last;
-      await pending.file!.copy('${dir.path}${Platform.pathSeparator}$mediaFileName');
-    } else if (job.inputType != 'text') {
-      if (!job.mediaAvailable) {
-        throw StateError('media-not-available');
+    String? mediaName;
+    try {
+      if (job.inputType != 'text') {
+        if (!job.mediaAvailable) throw StateError('media-not-available');
+        final downloaded = await ApiClient().downloadMedia(job.id, dir);
+        mediaFileName = downloaded.uri.pathSegments.last;
+        mediaName = job.inputType == 'video' ? 'الفيديو الأصلي' : 'الصورة الأصلية';
       }
-      final downloaded = await ApiClient().downloadMedia(job.id, dir);
-      mediaFileName = downloaded.uri.pathSegments.last;
-      mediaName ??= job.inputType == 'video' ? 'الفيديو الأصلي' : 'الصورة الأصلية';
-    }
 
-    final payload = <String, dynamic>{
-      'job_id': job.id,
-      'title': job.title,
-      'input_type': job.inputType,
-      'status': job.status,
-      'found_count': job.foundCount,
-      'target_results': job.targetResults,
-      'archived_at': DateTime.now().toUtc().toIso8601String(),
-      'media_file': mediaFileName,
-      'media_name': mediaName,
-      'results': results.map((r) => r.toJson()).toList(),
-    };
-    await File('${dir.path}${Platform.pathSeparator}archive.json').writeAsString(jsonEncode(payload), flush: true);
+      final payload = <String, dynamic>{
+        'job_id': job.id,
+        'title': job.title,
+        'input_type': job.inputType,
+        'status': job.status,
+        'found_count': job.foundCount,
+        'target_results': job.targetResults,
+        'archived_at': DateTime.now().toUtc().toIso8601String(),
+        'media_file': mediaFileName,
+        'media_name': mediaName,
+        'results': results.map((r) => r.toJson()).toList(),
+      };
+      await File('${dir.path}${Platform.pathSeparator}archive.json').writeAsString(
+        jsonEncode(payload),
+        flush: true,
+      );
+    } catch (_) {
+      if (await dir.exists()) await dir.delete(recursive: true);
+      rethrow;
+    }
   }
 
   Future<Set<String>> archivedIds() async {
@@ -176,9 +137,7 @@ class LocalArchiveStore {
   }
 
   Future<void> discardPending(String jobId) async {
-    final root = await _pendingRoot();
-    final dir = Directory('${root.path}${Platform.pathSeparator}$jobId');
-    if (await dir.exists()) await dir.delete(recursive: true);
+    // No pending local copy is created anymore.
   }
 
   Future<void> deleteArchive(String jobId) async {
@@ -188,30 +147,8 @@ class LocalArchiveStore {
   }
 
   Future<void> restoreArchive(String jobId) async {
-    final root = await _archiveRoot();
-    final dir = Directory('${root.path}${Platform.pathSeparator}$jobId');
-    if (!await dir.exists()) return;
-
-    final meta = File('${dir.path}${Platform.pathSeparator}archive.json');
-    if (await meta.exists()) {
-      try {
-        final data = jsonDecode(await meta.readAsString()) as Map<String, dynamic>;
-        final mediaFile = data['media_file'] as String?;
-        if (mediaFile != null) {
-          final source = File('${dir.path}${Platform.pathSeparator}$mediaFile');
-          if (await source.exists()) {
-            final pendingRoot = await _pendingRoot();
-            final pendingDir = Directory('${pendingRoot.path}${Platform.pathSeparator}$jobId');
-            await pendingDir.create(recursive: true);
-            await source.copy('${pendingDir.path}${Platform.pathSeparator}$mediaFile');
-            await File('${pendingDir.path}${Platform.pathSeparator}media.json').writeAsString(
-              jsonEncode({'name': data['media_name'], 'file': mediaFile}),
-              flush: true,
-            );
-          }
-        }
-      } catch (_) {}
-    }
-    await dir.delete(recursive: true);
+    // Restoring means removing the local snapshot so the synchronized cloud
+    // task appears again in Previous Tasks. Cloud data itself is untouched.
+    await deleteArchive(jobId);
   }
 }

@@ -36,6 +36,16 @@ class Principal:
     device_id: str
 
 
+def principal_for_token(db: Session, token: str) -> Principal | None:
+    normalized = token.strip()
+    if not normalized:
+        return None
+    device = db.scalar(select(Device).where(Device.token_hash == _hash_token(normalized)))
+    if device is None:
+        return None
+    return Principal(account_id=device.account_id, device_id=device.id)
+
+
 def register_device(db: Session, name: str) -> dict:
     account = Account()
     db.add(account)
@@ -81,10 +91,7 @@ def require_principal(
 ) -> Principal:
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="missing device token")
-    token = authorization[7:].strip()
-    if not token:
-        raise HTTPException(status_code=401, detail="missing device token")
-    device = db.scalar(select(Device).where(Device.token_hash == _hash_token(token)))
-    if device is None:
+    principal = principal_for_token(db, authorization[7:])
+    if principal is None:
         raise HTTPException(status_code=401, detail="invalid device token")
-    return Principal(account_id=device.account_id, device_id=device.id)
+    return principal

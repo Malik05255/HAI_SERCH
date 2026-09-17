@@ -20,4 +20,14 @@ void main() {
     expect(parseSha256('not-a-hash  file.apk'), isNull);
     expect(parseSha256('abc123'), isNull);
   });
+
+  test('Windows updater runs an in-place silent installer', () {
+    final args = windowsInstallerArguments();
+
+    expect(args, contains('/SILENT'));
+    expect(args, contains('/CLOSEAPPLICATIONS'));
+    expect(args, contains('/RESTARTAPPLICATIONS'));
+    expect(args, contains('/NORESTART'));
+    expect(args, contains('/SUPPRESSMSGBOXES'));
+  });
 }

@@ -14,6 +14,12 @@ if manifest.exists():
     if "android.permission.INTERNET" not in text:
         text = text.replace(marker, marker + permissions)
     text = text.replace('android:label="deep_search"', 'android:label="البحث العميق"')
+    if "android:roundIcon=" not in text:
+        text = text.replace(
+            'android:icon="@mipmap/ic_launcher"',
+            'android:icon="@mipmap/ic_launcher"\n        android:roundIcon="@mipmap/ic_launcher_round"',
+            1,
+        )
     manifest.write_text(text, encoding="utf-8")
 
 # Keep Android metadata explicit and reproducible for current Flutter/Firebase plugins.

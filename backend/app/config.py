@@ -28,7 +28,10 @@ class Settings(BaseSettings):
     planner_timeout_seconds: int = 75
     planner_max_queries: int = 6
 
+    image_max_upload_mb: int = 30
+    image_max_pixels: int = 80_000_000
     video_max_upload_mb: int = 250
+    video_max_duration_seconds: int = 600
     video_max_keyframes: int = 12
     video_transcribe_max_seconds: int = 300
     ocr_languages: str = "eng+ara+deu+fra+spa+chi_sim+chi_tra+jpn+kor+rus+tur"

@@ -37,6 +37,9 @@ services:
       - "2048"
       - -np
       - "1"
+      - --no-mmproj-offload
+      - --n-gpu-layers
+      - "0"
     volumes:
       - vision_cache:/root/.cache
     mem_limit: 1200m

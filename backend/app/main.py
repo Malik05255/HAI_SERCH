@@ -20,7 +20,7 @@ from .schemas import JobCreate, JobOut, ResultOut
 CREATE_LOCK_KEY = 847251902
 FINAL_STATES = ("completed", "partial", "failed", "needs_context", "cancelled")
 CONTINUABLE_STATES = ("completed", "partial", "failed", "needs_context")
-app = FastAPI(title=settings.app_name, version="0.6.0")
+app = FastAPI(title=settings.app_name, version="0.7.0")
 
 
 class DeviceCreate(BaseModel):
@@ -62,6 +62,24 @@ def _media_path(job: Job, account_id: str) -> Path | None:
         return path
     except (OSError, ValueError):
         return None
+
+
+def _storage_snapshot(account_id: str) -> dict:
+    root = account_upload_root(account_id)
+    files = [p for p in root.iterdir() if p.is_file()]
+    used = 0
+    for path in files:
+        try:
+            used += path.stat().st_size
+        except OSError:
+            pass
+    quota = settings.cloud_media_quota_gb * 1024 * 1024 * 1024
+    return {
+        "used_bytes": used,
+        "quota_bytes": quota,
+        "media_files": len(files),
+        "free_bytes": max(0, quota - used),
+    }
 
 
 def _job_out(job: Job, positions: dict[str, int]) -> dict:
@@ -148,9 +166,18 @@ def revoke_device(
     return {"ok": True}
 
 
+@app.get("/v1/storage")
+def storage(principal: Principal = Depends(require_principal)) -> dict:
+    return _storage_snapshot(principal.account_id)
+
+
 @app.post("/v1/uploads")
 async def upload(file: UploadFile, principal: Principal = Depends(require_principal)) -> dict:
     max_bytes = settings.video_max_upload_mb * 1024 * 1024
+    snapshot = _storage_snapshot(principal.account_id)
+    if snapshot["free_bytes"] <= 0:
+        raise HTTPException(status_code=507, detail="cloud media storage is full")
+
     suffix = Path(file.filename or "upload.bin").suffix.casefold()[:12]
     key = f"{uuid4()}{suffix}"
     destination = account_upload_root(principal.account_id) / key
@@ -161,6 +188,8 @@ async def upload(file: UploadFile, principal: Principal = Depends(require_princi
                 written += len(chunk)
                 if written > max_bytes:
                     raise HTTPException(status_code=413, detail="file too large")
+                if written > snapshot["free_bytes"]:
+                    raise HTTPException(status_code=507, detail="cloud media storage quota exceeded")
                 output.write(chunk)
     except Exception:
         destination.unlink(missing_ok=True)
@@ -255,6 +284,22 @@ def get_media(job_id: str, principal: Principal = Depends(require_principal), db
         raise HTTPException(status_code=404, detail="media not available")
     media_type = "video/mp4" if job.input_type == "video" and path.suffix.casefold() == ".mp4" else None
     return FileResponse(path, media_type=media_type, filename=f"deep-search-{job.id}{path.suffix.casefold()}")
+
+
+@app.delete("/v1/jobs/{job_id}/media")
+def delete_cloud_media(
+    job_id: str,
+    principal: Principal = Depends(require_principal),
+    db: Session = Depends(get_db),
+) -> dict:
+    job = _owned_job(db, job_id, principal)
+    if job.status in ACTIVE_STATES:
+        raise HTTPException(status_code=409, detail="cannot remove media while search is active")
+    if job.input_url:
+        delete_uploaded_media(job.input_url)
+        job.input_url = None
+        db.commit()
+    return {"ok": True, "storage": _storage_snapshot(principal.account_id)}
 
 
 @app.post("/v1/jobs/{job_id}/stop", response_model=JobOut)

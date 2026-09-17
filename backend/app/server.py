@@ -71,10 +71,17 @@ def add_job_clue(
             job.attempts = settings.search_continue_attempt_floor
         else:
             job.attempts = max(job.attempts, settings.search_continue_attempt_floor)
+        now = datetime.now(timezone.utc)
         job.status = "queued"
         job.stop_requested = False
-        job.next_run_at = datetime.now(timezone.utc)
+        job.next_run_at = now
         job.heartbeat_at = None
+        # Reopening an old completed job is a new queue entry. Move it to the
+        # back just like /continue so it cannot jump ahead of waiting jobs.
+        job.created_at = now
+        # Cancel an unsent notification for the old terminal state. A new
+        # completion will create its own delivery record.
+        job.notification_pending = False
     elif job.status == "queued":
         job.next_run_at = datetime.now(timezone.utc)
     elif job.status not in {"running", "stopped"}:

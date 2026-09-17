@@ -20,7 +20,7 @@ from .schemas import JobCreate, JobOut, ResultOut
 CREATE_LOCK_KEY = 847251902
 FINAL_STATES = ("completed", "partial", "failed", "needs_context", "cancelled")
 CONTINUABLE_STATES = ("completed", "partial", "failed", "needs_context")
-app = FastAPI(title=settings.app_name, version="0.7.0")
+app = FastAPI(title=settings.app_name, version="0.8.0")
 
 
 class DeviceCreate(BaseModel):
@@ -333,10 +333,19 @@ def continue_job(job_id: str, principal: Principal = Depends(require_principal),
     if job.input_type != "text" and _media_path(job, principal.account_id) is None:
         raise HTTPException(status_code=409, detail="cloud media is no longer available")
     _lock_capacity(db, principal.account_id)
+
+    # Continue is intentionally deeper than a fresh search. Keep existing
+    # results and resume from at least the configured expansion stage instead
+    # of replaying the first queries again.
+    previous_attempts = job.attempts
+    if previous_attempts >= settings.search_max_attempts:
+        job.attempts = settings.search_continue_attempt_floor
+    else:
+        job.attempts = max(previous_attempts, settings.search_continue_attempt_floor)
+
     job.stop_requested = False
     job.status = "queued"
-    job.progress = 0.0
-    job.attempts = 0
+    job.progress = 0.15
     job.next_run_at = datetime.now(timezone.utc)
     job.created_at = datetime.now(timezone.utc)
     db.commit()

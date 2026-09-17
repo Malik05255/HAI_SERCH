@@ -129,7 +129,9 @@ def _vision_describe(path: Path) -> str:
     if not settings.vision_enabled:
         return ""
     try:
-        with tempfile.TemporaryDirectory(dir=Path(settings.data_dir, "tmp")) as directory:
+        tmp_root = Path(settings.data_dir, "tmp")
+        tmp_root.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=tmp_root) as directory:
             normalized = _vision_input(path, Path(directory, "vision.jpg"))
             if normalized is None:
                 return ""
@@ -221,24 +223,35 @@ def _empty_features() -> dict:
     return {"ocr": "", "transcript": "", "vision": "", "hashes": []}
 
 
+def _cached_features(cache_path: Path) -> dict | None:
+    if not cache_path.is_file():
+        return None
+    try:
+        cached = json.loads(cache_path.read_text(encoding="utf-8"))
+        if not isinstance(cached, dict):
+            return None
+        result = {
+            "ocr": str(cached.get("ocr") or ""),
+            "transcript": str(cached.get("transcript") or ""),
+            "vision": str(cached.get("vision") or ""),
+            "hashes": [str(x) for x in cached.get("hashes", []) if x],
+        }
+        if settings.vision_enabled and not result["vision"]:
+            return None
+        return result
+    except Exception:
+        return None
+
+
 def media_features(input_url: str | None, input_type: str, max_frames: int) -> dict:
     path = _safe_local_path(input_url)
     if path is None:
         return _empty_features()
 
     cache_path = _analysis_cache_path(path)
-    if cache_path.is_file():
-        try:
-            cached = json.loads(cache_path.read_text(encoding="utf-8"))
-            if isinstance(cached, dict):
-                return {
-                    "ocr": str(cached.get("ocr") or ""),
-                    "transcript": str(cached.get("transcript") or ""),
-                    "vision": str(cached.get("vision") or ""),
-                    "hashes": [str(x) for x in cached.get("hashes", []) if x],
-                }
-        except Exception:
-            pass
+    cached = _cached_features(cache_path)
+    if cached is not None:
+        return cached
 
     result = _empty_features()
     suffix = path.suffix.casefold()
@@ -278,10 +291,14 @@ def media_features(input_url: str | None, input_type: str, max_frames: int) -> d
         except Exception:
             pass
 
-    try:
-        cache_path.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
-    except OSError:
-        pass
+    # A media job that requires Vision is not considered analysed until the
+    # visual model actually returned content. This prevents an early service
+    # startup failure from becoming a permanent empty cache.
+    if not settings.vision_enabled or result["vision"]:
+        try:
+            cache_path.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+        except OSError:
+            pass
     return result
 
 

@@ -7,6 +7,8 @@ from app.models import Job, Result
 from app.research import (
     Candidate,
     _best_overlap,
+    _candidate_from_item,
+    _canonical_http_url,
     _image_hash_variants,
     _preliminary_candidates,
     _visual_match,
@@ -145,6 +147,34 @@ def test_text_only_preliminary_budget_remains_text_ranked() -> None:
     selected = _preliminary_candidates(raw, verify_pages=1, has_visual_refs=False)
 
     assert [candidate.title for candidate in selected] == ["high", "medium"]
+
+
+def test_canonical_url_drops_tracking_without_losing_meaningful_query() -> None:
+    canonical = _canonical_http_url(
+        "HTTPS://Example.COM/movie?id=42&utm_source=newsletter&fbclid=abc#comments"
+    )
+
+    assert canonical == "https://example.com/movie?id=42"
+
+
+def test_candidate_normalizes_relative_image_and_source_tracking() -> None:
+    candidate = _candidate_from_item(
+        {
+            "url": "https://example.com/review?utm_campaign=test&id=7",
+            "title": "Review",
+            "img_src": "/images/poster.jpg?utm_source=feed",
+            "content": "plot details",
+        }
+    )
+
+    assert candidate is not None
+    assert candidate.url == "https://example.com/review?id=7"
+    assert candidate.image_url == "https://example.com/images/poster.jpg"
+
+
+def test_canonical_url_rejects_credentials_and_non_http_schemes() -> None:
+    assert _canonical_http_url("https://alice:secret@example.com/private") == ""
+    assert _canonical_http_url("file:///etc/passwd") == ""
 
 
 def test_safe_error_redacts_url_credentials_and_limits_output() -> None:

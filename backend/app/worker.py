@@ -13,6 +13,7 @@ from .config import settings
 from .database import SessionLocal, ensure_schema
 from .media import delete_uploaded_media, media_features
 from .models import Job, Result
+from .notifications import send_job_pushes
 from .planner import plan_queries
 from .queue import claim_next_job, requeue
 from .research import run_research
@@ -20,6 +21,7 @@ from .research import run_research
 
 TITLE_TOKEN_RE = re.compile(r"[^\w\u0600-\u06ff]+", re.UNICODE)
 CREDENTIAL_URL_RE = re.compile(r"://[^@\s]+@")
+PUSH_COMPLETION_STATES = {"completed", "partial"}
 
 
 def utcnow():
@@ -66,6 +68,15 @@ def finish_job(db, job, status: str, progress: float | None = None, purge_media:
     if purge_media:
         purge_job_media(job)
     db.commit()
+
+    # The default product behavior is completion-only notifications. Keep push
+    # delivery best-effort and completely outside the research transaction so a
+    # Firebase outage can never turn a successful search into a failed job.
+    if status in PUSH_COMPLETION_STATES:
+        try:
+            send_job_pushes(db, job)
+        except Exception:
+            pass
 
 
 def _effective_query(job, features: dict) -> str:

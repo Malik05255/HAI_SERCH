@@ -14,6 +14,13 @@ jobs:
         with:
           python-version: "3.12"
       - run: python -m compileall backend/app scripts
+      - name: Validate Docker Compose stacks
+        run: |
+          cp .env.example .env
+          docker compose -f docker-compose.yml config >/dev/null
+          docker compose -f docker-compose.yml -f docker-compose.vpn.yml config >/dev/null
+      - name: Build VPN proxy sidecar
+        run: docker build -t deep-search-egress-ci infra/egress
 
   android:
     runs-on: ubuntu-latest

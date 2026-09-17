@@ -74,12 +74,6 @@ Future<void> _offerVerifiedUpdate(
   }
 }
 
-Uri? _safeWebUri(String value) {
-  final uri = Uri.tryParse(value.trim());
-  if (uri == null || !const {'http', 'https'}.contains(uri.scheme)) return null;
-  return uri;
-}
-
 Future<bool> _submitClue(
   BuildContext context,
   ApiClient api,

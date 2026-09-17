@@ -9,6 +9,7 @@ from .config import settings
 from .database import Base, SessionLocal, engine
 from .media import delete_uploaded_media, media_features
 from .models import Result
+from .planner import plan_queries
 from .queue import claim_next_job, requeue
 from .research import run_research
 
@@ -76,6 +77,8 @@ def process_one() -> bool:
             finish_job(db, job, "needs_context")
             return True
 
+        planned_queries = plan_queries(effective_query)
+
         try:
             candidates = asyncio.run(
                 run_research(
@@ -83,6 +86,7 @@ def process_one() -> bool:
                     job.attempts - 1,
                     budget,
                     reference_hashes=hashes,
+                    planned_queries=planned_queries,
                 )
             )
             db.refresh(job)
@@ -99,6 +103,7 @@ def process_one() -> bool:
                 evidence = {
                     "verified_page": bool(candidate.summary),
                     "attempt": job.attempts,
+                    "planner_used": bool(planned_queries),
                     "media_enriched": bool(features.get("ocr") or features.get("transcript") or features.get("vision")),
                     "vision_used": bool(features.get("vision")),
                     "speech_used": bool(features.get("transcript")),

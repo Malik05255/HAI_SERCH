@@ -37,6 +37,10 @@ def process_one() -> bool:
         job = claim_next_job(db)
         if job is None:
             return False
+        if job.archived:
+            purge_job_media(job)
+            db.commit()
+            return True
         if job.stop_requested:
             finish_job(db, job, "stopped", purge_media=False)
             return True
@@ -49,6 +53,12 @@ def process_one() -> bool:
 
         try:
             candidates = asyncio.run(run_research(effective_query, job.attempts - 1, budget))
+            db.refresh(job)
+            if job.archived or job.status == "cancelled":
+                purge_job_media(job)
+                db.commit()
+                return True
+
             existing = {r.url: r for r in db.scalars(select(Result).where(Result.job_id == job.id)).all()}
             for candidate in candidates:
                 if candidate.url in existing:
@@ -93,7 +103,11 @@ def process_one() -> bool:
                 db.commit()
                 requeue(db, job)
         except Exception:
-            if job.stop_requested:
+            db.refresh(job)
+            if job.archived or job.status == "cancelled":
+                purge_job_media(job)
+                db.commit()
+            elif job.stop_requested:
                 finish_job(db, job, "stopped", purge_media=False)
             elif job.attempts >= settings.search_max_attempts:
                 finish_job(db, job, "failed")

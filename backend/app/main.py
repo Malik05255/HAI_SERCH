@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
@@ -14,13 +15,23 @@ from .schemas import JobCreate, JobOut, ResultOut
 
 
 CREATE_LOCK_KEY = 847251902
-app = FastAPI(title=settings.app_name, version="0.3.0")
+FINAL_STATES = ("completed", "partial", "failed", "needs_context", "cancelled")
+app = FastAPI(title=settings.app_name, version="0.4.0")
+
+
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 @app.on_event("startup")
 def startup() -> None:
     Path(settings.data_dir, "uploads").mkdir(parents=True, exist_ok=True)
     Base.metadata.create_all(bind=engine)
+    # Lightweight forward migration for deployments created before archive support.
+    with engine.begin() as connection:
+        connection.exec_driver_sql("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS archived BOOLEAN NOT NULL DEFAULT FALSE")
+        connection.exec_driver_sql("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ NULL")
+        connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_jobs_archived ON jobs (archived)")
 
 
 def require_api_key(x_api_key: str | None = Header(default=None, alias="X-API-Key")) -> None:
@@ -34,7 +45,7 @@ def _queue_positions(db: Session) -> dict[str, int]:
     jobs = list(
         db.scalars(
             select(Job)
-            .where(Job.status.in_(ACTIVE_STATES))
+            .where(Job.status.in_(ACTIVE_STATES), Job.archived.is_(False))
             .order_by(Job.created_at.asc(), Job.id.asc())
         ).all()
     )
@@ -52,6 +63,7 @@ def _job_out(job: Job, positions: dict[str, int]) -> dict:
         "found_count": job.found_count,
         "attempts": job.attempts,
         "queue_position": positions.get(job.id),
+        "archived": bool(job.archived),
         "created_at": job.created_at,
         "updated_at": job.updated_at,
     }
@@ -88,7 +100,7 @@ async def upload(file: UploadFile) -> dict:
     else:
         destination.unlink(missing_ok=True)
         raise HTTPException(status_code=415, detail="unsupported media type")
-    return {"upload_id": key, "input_url": key, "input_type": input_type, "size": written, "temporary": True}
+    return {"upload_id": key, "input_type": input_type, "size": written, "temporary": True}
 
 
 @app.post("/v1/jobs", response_model=JobOut, dependencies=[Depends(require_api_key)])
@@ -104,9 +116,12 @@ def create_job(payload: JobCreate, db: Session = Depends(get_db)) -> dict:
             raise HTTPException(status_code=422, detail="upload type mismatch")
         input_url = str(path)
 
-    # Serialize capacity checks so concurrent Android/Windows submissions cannot exceed five.
     db.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": CREATE_LOCK_KEY})
-    active_count = db.scalar(select(func.count()).select_from(Job).where(Job.status.in_(ACTIVE_STATES))) or 0
+    active_count = db.scalar(
+        select(func.count()).select_from(Job).where(
+            Job.status.in_(ACTIVE_STATES), Job.archived.is_(False)
+        )
+    ) or 0
     if active_count >= settings.search_max_active_jobs:
         if input_url:
             delete_uploaded_media(input_url)
@@ -126,9 +141,20 @@ def create_job(payload: JobCreate, db: Session = Depends(get_db)) -> dict:
 
 
 @app.get("/v1/jobs", response_model=list[JobOut], dependencies=[Depends(require_api_key)])
-def list_jobs(db: Session = Depends(get_db)) -> list[dict]:
+def list_jobs(view: str = "all", db: Session = Depends(get_db)) -> list[dict]:
     positions = _queue_positions(db)
-    jobs = list(db.scalars(select(Job).order_by(Job.created_at.desc()).limit(100)).all())
+    stmt = select(Job)
+    if view == "queue":
+        stmt = stmt.where(Job.archived.is_(False), Job.status.in_(ACTIVE_STATES)).order_by(Job.created_at.asc())
+    elif view == "archive":
+        stmt = stmt.where(Job.archived.is_(True)).order_by(Job.archived_at.desc(), Job.updated_at.desc())
+    elif view == "history":
+        stmt = stmt.where(Job.archived.is_(False), Job.status.in_(FINAL_STATES)).order_by(Job.updated_at.desc())
+    elif view == "all":
+        stmt = stmt.where(Job.archived.is_(False)).order_by(Job.created_at.desc())
+    else:
+        raise HTTPException(status_code=422, detail="invalid view")
+    jobs = list(db.scalars(stmt.limit(100)).all())
     return [_job_out(job, positions) for job in jobs]
 
 
@@ -150,7 +176,7 @@ def stop_job(job_id: str, db: Session = Depends(get_db)) -> dict:
     job = db.get(Job, job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="job not found")
-    if job.status not in {"completed", "partial", "failed", "needs_context", "cancelled"}:
+    if not job.archived and job.status not in FINAL_STATES:
         job.stop_requested = True
         job.status = "stopped"
         db.commit()
@@ -163,7 +189,7 @@ def resume_job(job_id: str, db: Session = Depends(get_db)) -> dict:
     job = db.get(Job, job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="job not found")
-    if job.status == "stopped":
+    if not job.archived and job.status == "stopped":
         job.stop_requested = False
         job.status = "queued"
         db.commit()
@@ -184,3 +210,46 @@ def cancel_job(job_id: str, db: Session = Depends(get_db)) -> dict:
     db.commit()
     db.refresh(job)
     return _job_out(job, _queue_positions(db))
+
+
+@app.post("/v1/jobs/{job_id}/archive", response_model=JobOut, dependencies=[Depends(require_api_key)])
+def archive_job(job_id: str, db: Session = Depends(get_db)) -> dict:
+    job = db.get(Job, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    if job.status in ACTIVE_STATES:
+        job.stop_requested = True
+        job.status = "cancelled"
+        if job.input_url:
+            delete_uploaded_media(job.input_url)
+            job.input_url = None
+    job.archived = True
+    job.archived_at = utcnow()
+    db.commit()
+    db.refresh(job)
+    return _job_out(job, _queue_positions(db))
+
+
+@app.post("/v1/jobs/{job_id}/restore", response_model=JobOut, dependencies=[Depends(require_api_key)])
+def restore_job(job_id: str, db: Session = Depends(get_db)) -> dict:
+    job = db.get(Job, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    job.archived = False
+    job.archived_at = None
+    db.commit()
+    db.refresh(job)
+    return _job_out(job, _queue_positions(db))
+
+
+@app.delete("/v1/jobs/{job_id}", dependencies=[Depends(require_api_key)])
+def delete_job(job_id: str, db: Session = Depends(get_db)) -> dict:
+    job = db.get(Job, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    if job.input_url:
+        delete_uploaded_media(job.input_url)
+        job.input_url = None
+    db.delete(job)
+    db.commit()
+    return {"ok": True}

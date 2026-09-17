@@ -18,8 +18,9 @@ class ApiClient {
         if (apiKey.isNotEmpty) 'X-API-Key': apiKey,
       };
 
-  Future<List<SearchJob>> listJobs() async {
-    final response = await http.get(Uri.parse('$baseUrl/v1/jobs'), headers: _headers);
+  Future<List<SearchJob>> listJobs({String view = 'all'}) async {
+    final uri = Uri.parse('$baseUrl/v1/jobs').replace(queryParameters: {'view': view});
+    final response = await http.get(uri, headers: _headers);
     _ensureOk(response);
     final items = jsonDecode(response.body) as List<dynamic>;
     return items.map((e) => SearchJob.fromJson(e as Map<String, dynamic>)).toList();
@@ -29,7 +30,6 @@ class ApiClient {
     required String query,
     required String inputType,
     String? uploadId,
-    String? inputUrl,
   }) async {
     final response = await http.post(
       Uri.parse('$baseUrl/v1/jobs'),
@@ -37,7 +37,7 @@ class ApiClient {
       body: jsonEncode({
         'query': query,
         'input_type': inputType,
-        'upload_id': uploadId ?? inputUrl,
+        'upload_id': uploadId,
         'target_results': 10,
       }),
     );
@@ -64,6 +64,11 @@ class ApiClient {
 
   Future<void> action(String jobId, String action) async {
     final response = await http.post(Uri.parse('$baseUrl/v1/jobs/$jobId/$action'), headers: _headers);
+    _ensureOk(response);
+  }
+
+  Future<void> deleteJob(String jobId) async {
+    final response = await http.delete(Uri.parse('$baseUrl/v1/jobs/$jobId'), headers: _headers);
     _ensureOk(response);
   }
 

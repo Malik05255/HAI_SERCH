@@ -8,6 +8,8 @@ class SearchJob {
     required this.foundCount,
     required this.targetResults,
     required this.attempts,
+    required this.archived,
+    this.queuePosition,
   });
 
   final String id;
@@ -18,6 +20,8 @@ class SearchJob {
   final int foundCount;
   final int targetResults;
   final int attempts;
+  final int? queuePosition;
+  final bool archived;
 
   factory SearchJob.fromJson(Map<String, dynamic> json) => SearchJob(
         id: json['id'] as String,
@@ -28,11 +32,15 @@ class SearchJob {
         foundCount: (json['found_count'] as num?)?.toInt() ?? 0,
         targetResults: (json['target_results'] as num?)?.toInt() ?? 10,
         attempts: (json['attempts'] as num?)?.toInt() ?? 0,
+        queuePosition: (json['queue_position'] as num?)?.toInt(),
+        archived: (json['archived'] as bool?) ?? false,
       );
 
   String get title => query.trim().isEmpty
       ? (inputType == 'video' ? 'بحث بالفيديو' : 'بحث بالصورة')
       : query.trim();
+
+  bool get isActive => const {'queued', 'running', 'stopped'}.contains(status);
 }
 
 class SearchResult {

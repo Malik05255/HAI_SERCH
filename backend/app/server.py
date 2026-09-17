@@ -14,7 +14,7 @@ from .auth import Principal, principal_for_token, require_principal
 from .config import settings
 from .database import SessionLocal, get_db
 from .egress import EgressRouter
-from .main import CONTINUABLE_STATES, _job_out, _lock_capacity, _owned_job, _queue_positions, app
+from .main import CONTINUABLE_STATES, _job_out, _lock_capacity, _media_path, _owned_job, _queue_positions, app
 from .models import Device, Job, Result
 
 
@@ -29,6 +29,18 @@ class PushTokenUpdate(BaseModel):
 
 class JobClue(BaseModel):
     text: str = Field(min_length=1, max_length=1500)
+
+
+def _ensure_clue_can_reopen(job: Job, account_id: str) -> None:
+    if (
+        job.status in CONTINUABLE_STATES
+        and job.input_type != "text"
+        and _media_path(job, account_id) is None
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="media was purged after research finished; upload it again to continue",
+        )
 
 
 @app.put("/v1/auth/push-token")
@@ -69,6 +81,7 @@ def add_job_clue(
     job = _owned_job(db, job_id, principal)
     if job.status == "cancelled":
         raise HTTPException(status_code=409, detail="cancelled job cannot accept clues")
+    _ensure_clue_can_reopen(job, principal.account_id)
 
     clue = " ".join(payload.text.split()).strip()
     if not clue:

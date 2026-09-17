@@ -67,6 +67,11 @@ class LocalArchiveStore {
     return dir;
   }
 
+  // Compatibility shims while the UI migrates fully to cloud-only media.
+  Future<void> rememberSource(String jobId, String sourcePath, String originalName) async {}
+
+  Future<void> discardPending(String jobId) async {}
+
   Future<void> archiveJob(SearchJob job, List<SearchResult> results) async {
     final root = await _archiveRoot();
     final dir = Directory('${root.path}${Platform.pathSeparator}${job.id}');

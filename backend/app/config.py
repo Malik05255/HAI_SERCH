@@ -45,6 +45,10 @@ class Settings(BaseSettings):
     cloud_media_quota_gb: int = 20
     temp_file_ttl_hours: int = 24
 
+    notifications_enabled: bool = False
+    firebase_project_id: str = ""
+    firebase_service_account_b64: str = ""
+
     # Public web egress only. SearXNG and other Docker-internal services always
     # stay on the direct internal network and are never sent through this proxy.
     egress_mode: str = "auto"  # auto | direct | vpn

@@ -38,6 +38,14 @@ jobs:
               exit 1
             }
           done
+          [[ "$API_BASE_URL" == https://* ]] || {
+            echo "API_BASE_URL must use HTTPS in production"
+            exit 1
+          }
+          [[ "$API_BASE_URL" != */ ]] || {
+            echo "API_BASE_URL must not end with a slash"
+            exit 1
+          }
 
   android:
     needs: validate

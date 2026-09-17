@@ -193,6 +193,15 @@ async def _image_phashes(url: str | None, egress: EgressRouter, sem: asyncio.Sem
             return []
 
 
+def _has_verifiable_evidence(candidate: Candidate, page_text: str) -> bool:
+    if bool(page_text.strip()):
+        return True
+    return (
+        candidate.visual_distance is not None
+        and candidate.visual_distance <= settings.visual_hash_max_distance
+    )
+
+
 def _visual_match(
     reference_hashes: list[str],
     candidate_hashes: str | list[str],
@@ -359,6 +368,9 @@ async def run_research(
 
     verified: list[Candidate] = []
     for candidate, page_text in zip(ranked, texts):
+        if not _has_verifiable_evidence(candidate, page_text):
+            continue
+
         snippet_score = _best_overlap(queries, f"{candidate.title} {candidate.snippet}") * 100.0
         page_score = _best_overlap(queries, page_text[:12000]) * 100.0 if page_text else 0.0
         text_score = snippet_score * 0.35 + page_score * 0.65

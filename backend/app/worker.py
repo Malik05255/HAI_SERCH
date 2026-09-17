@@ -67,16 +67,28 @@ def finish_job(db, job, status: str, progress: float | None = None, purge_media:
     job.heartbeat_at = None
     if purge_media:
         purge_job_media(job)
+
+    should_notify = status in PUSH_COMPLETION_STATES and settings.notifications_enabled
+    job.notification_pending = should_notify
+    if should_notify:
+        # A continued/re-run job is allowed to produce a new completion
+        # notification, so clear the previous delivery timestamp here.
+        job.notification_sent_at = None
     db.commit()
 
-    # The default product behavior is completion-only notifications. Keep push
-    # delivery best-effort and completely outside the research transaction so a
-    # Firebase outage can never turn a successful search into a failed job.
-    if status in PUSH_COMPLETION_STATES:
-        try:
-            send_job_pushes(db, job)
-        except Exception:
-            pass
+    if not should_notify:
+        return
+
+    # Push delivery is best-effort and outside the research transaction. When
+    # it fails the pending bit remains in PostgreSQL for runtime retry.
+    try:
+        delivered = send_job_pushes(db, job)
+    except Exception:
+        delivered = False
+    if delivered:
+        job.notification_pending = False
+        job.notification_sent_at = utcnow()
+        db.commit()
 
 
 def _effective_query(job, features: dict) -> str:

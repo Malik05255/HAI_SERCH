@@ -42,12 +42,6 @@ services:
     volumes:
       - planner_cache:/root/.cache
     mem_limit: 1100m
-    healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8082/health >/dev/null || exit 1"]
-      interval: 15s
-      timeout: 5s
-      retries: 40
-      start_period: 20s
 
   vision:
     image: ghcr.io/ggml-org/llama.cpp:server
@@ -69,12 +63,6 @@ services:
     volumes:
       - vision_cache:/root/.cache
     mem_limit: 1200m
-    healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8081/health >/dev/null || exit 1"]
-      interval: 15s
-      timeout: 5s
-      retries: 40
-      start_period: 30s
 
   api:
     build: ./backend
@@ -102,9 +90,9 @@ services:
       searxng:
         condition: service_started
       planner:
-        condition: service_healthy
+        condition: service_started
       vision:
-        condition: service_healthy
+        condition: service_started
     mem_limit: 3g
 
 volumes:

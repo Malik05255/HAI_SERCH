@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:path_provider/path_provider.dart';
 
+import 'api.dart';
 import 'models.dart';
 
 class LocalArchiveItem {
@@ -113,23 +114,29 @@ class LocalArchiveStore {
 
   Future<bool> hasPendingMedia(String jobId) async {
     final pending = await _pendingMedia(jobId);
-    return pending.file != null && await pending.file!.exists();
+    if (pending.file != null && await pending.file!.exists()) return true;
+    // A linked device may not have a local pending copy; archiveJob can fetch it from cloud.
+    return true;
   }
 
   Future<void> archiveJob(SearchJob job, List<SearchResult> results) async {
     final pending = await _pendingMedia(job.id);
-    if (job.inputType != 'text' && (pending.file == null || !await pending.file!.exists())) {
-      throw StateError('media-not-on-this-device');
-    }
-
     final root = await _archiveRoot();
     final dir = Directory('${root.path}${Platform.pathSeparator}${job.id}');
     await dir.create(recursive: true);
 
     String? mediaFileName;
+    String? mediaName = pending.name;
     if (pending.file != null && await pending.file!.exists()) {
       mediaFileName = pending.file!.uri.pathSegments.last;
       await pending.file!.copy('${dir.path}${Platform.pathSeparator}$mediaFileName');
+    } else if (job.inputType != 'text') {
+      if (!job.mediaAvailable) {
+        throw StateError('media-not-available');
+      }
+      final downloaded = await ApiClient().downloadMedia(job.id, dir);
+      mediaFileName = downloaded.uri.pathSegments.last;
+      mediaName ??= job.inputType == 'video' ? 'الفيديو الأصلي' : 'الصورة الأصلية';
     }
 
     final payload = <String, dynamic>{
@@ -141,7 +148,7 @@ class LocalArchiveStore {
       'target_results': job.targetResults,
       'archived_at': DateTime.now().toUtc().toIso8601String(),
       'media_file': mediaFileName,
-      'media_name': pending.name,
+      'media_name': mediaName,
       'results': results.map((r) => r.toJson()).toList(),
     };
     await File('${dir.path}${Platform.pathSeparator}archive.json').writeAsString(jsonEncode(payload), flush: true);

@@ -94,10 +94,7 @@ def send_job_pushes(db: Session, job: Job) -> bool:
                         "found_count": str(job.found_count),
                         "target_results": str(job.target_results),
                     },
-                    "android": {
-                        "priority": "high",
-                        "notification": {"channel_id": "deep_search_results"},
-                    },
+                    "android": {"priority": "high"},
                 }
             }
             try:

@@ -23,6 +23,17 @@ TITLE_TOKEN_RE = re.compile(r"[^\w\u0600-\u06ff]+", re.UNICODE)
 CREDENTIAL_URL_RE = re.compile(r"://[^@\s]+@")
 PUSH_COMPLETION_STATES = {"completed", "partial"}
 PURGE_MEDIA_STATES = {"completed", "partial", "failed"}
+YEAR_TOKEN_RE = re.compile(r"^(?:18|19|20|21)\d{2}$")
+WORK_TITLE_NOISE = {
+    "a", "an", "the",
+    "film", "movie", "movies", "series", "tv", "show",
+    "review", "reviews", "trailer", "official", "watch", "stream", "streaming",
+    "episode", "season", "full", "hd",
+    "imdb", "tmdb", "wikipedia", "netflix", "justwatch", "youtube",
+    "فيلم", "افلام", "أفلام", "مسلسل", "مسلسلات",
+    "مراجعة", "اعلان", "إعلان", "رسمي", "مشاهدة", "كامل",
+    "حلقة", "الحلقة", "موسم", "الموسم",
+}
 
 
 def utcnow():
@@ -107,6 +118,39 @@ def _title_key(value: str) -> str:
     return TITLE_TOKEN_RE.sub(" ", value.casefold()).strip()[:180]
 
 
+def _work_signature(value: str) -> tuple[tuple[str, ...], frozenset[str]]:
+    """Return title identity tokens and explicit years without source/review noise."""
+    tokens = [token for token in _title_key(value).split() if token]
+    years = frozenset(token for token in tokens if YEAR_TOKEN_RE.fullmatch(token))
+    core = tuple(
+        token
+        for token in tokens
+        if token not in years and token not in WORK_TITLE_NOISE
+    )
+    return core, years
+
+
+def _same_work_title(left: str, right: str) -> bool:
+    """Conservatively identify two result pages that refer to the same work."""
+    left_core, left_years = _work_signature(left)
+    right_core, right_years = _work_signature(right)
+
+    if left_years and right_years and left_years.isdisjoint(right_years):
+        return False
+    if not left_core or not right_core:
+        return _title_key(left) == _title_key(right)
+    if left_core == right_core:
+        return True
+
+    left_set = set(left_core)
+    right_set = set(right_core)
+    intersection = len(left_set & right_set)
+    union = len(left_set | right_set)
+    if intersection < 2 or union == 0:
+        return False
+    return intersection / union >= 0.85
+
+
 def _domain(value: str) -> str:
     try:
         host = urlparse(value).netloc.casefold().split(":", 1)[0]
@@ -146,35 +190,41 @@ def _merge_stronger_evidence(current: dict | None, incoming: dict) -> tuple[dict
 
 
 def _diverse_order(results: list[Result], target: int) -> list[Result]:
-    if not results:
+    """Choose unique works first; source diversity is soft, work diversity is hard."""
+    if not results or target <= 0:
         return []
 
     selected: list[Result] = []
-    deferred: list[Result] = []
+    domain_deferred: list[Result] = []
     domains: defaultdict[str, int] = defaultdict(int)
-    seen_titles: set[str] = set()
+
+    def duplicates_selected(candidate: Result) -> bool:
+        return any(_same_work_title(candidate.title, item.title) for item in selected)
 
     for result in results:
+        if duplicates_selected(result):
+            continue
         domain = _domain(result.url)
-        title_key = _title_key(result.title)
-        duplicate_title = bool(title_key and title_key in seen_titles)
-        domain_full = bool(domain and domains[domain] >= 2)
+        if domain and domains[domain] >= 2:
+            domain_deferred.append(result)
+            continue
 
-        if len(selected) < target and not duplicate_title and not domain_full:
-            selected.append(result)
-            if domain:
-                domains[domain] += 1
-            if title_key:
-                seen_titles.add(title_key)
-        else:
-            deferred.append(result)
+        selected.append(result)
+        if domain:
+            domains[domain] += 1
+        if len(selected) >= target:
+            return selected
 
-    if len(selected) < target:
-        needed = target - len(selected)
-        selected.extend(deferred[:needed])
-        deferred = deferred[needed:]
+    # Relax source concentration only when needed. A duplicate work is never
+    # reinserted merely to make the UI show the requested number of results.
+    for result in domain_deferred:
+        if duplicates_selected(result):
+            continue
+        selected.append(result)
+        if len(selected) >= target:
+            break
 
-    return selected + deferred
+    return selected
 
 
 def _image_capability(existing_result: Result | None, candidate_image_url: str | None) -> str | None:

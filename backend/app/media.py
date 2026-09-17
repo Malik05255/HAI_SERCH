@@ -293,13 +293,7 @@ def _video_duration(path: Path) -> float:
         return 0.0
 
 
-def _extract_video_frames(path: Path, directory: Path, max_frames: int) -> list[Path]:
-    pattern = str(directory / "frame-%02d.jpg")
-    duration = _video_duration(path)
-    if duration > 0 and max_frames > 0:
-        interval = max(0.45, duration / max_frames)
-    else:
-        interval = 12.0
+def _extract_with_filter(path: Path, pattern: Path, video_filter: str, max_frames: int) -> list[Path]:
     try:
         subprocess.run(
             [
@@ -309,12 +303,14 @@ def _extract_video_frames(path: Path, directory: Path, max_frames: int) -> list[
                 "-i",
                 str(path),
                 "-vf",
-                f"fps=1/{interval:.3f},scale=1280:-2:force_original_aspect_ratio=decrease",
+                video_filter,
+                "-fps_mode",
+                "vfr",
                 "-frames:v",
                 str(max_frames),
                 "-q:v",
                 "3",
-                pattern,
+                str(pattern),
             ],
             capture_output=True,
             timeout=180,
@@ -322,7 +318,66 @@ def _extract_video_frames(path: Path, directory: Path, max_frames: int) -> list[
         )
     except Exception:
         return []
-    return sorted(directory.glob("frame-*.jpg"))[:max_frames]
+    return sorted(pattern.parent.glob(pattern.name.replace("%02d", "*")))[:max_frames]
+
+
+def _dedupe_frames(paths: list[Path], max_frames: int) -> list[Path]:
+    selected: list[Path] = []
+    fingerprints: list[imagehash.ImageHash] = []
+    for path in paths:
+        try:
+            with Image.open(path) as image:
+                fingerprint = imagehash.phash(image.convert("RGB"))
+        except Exception:
+            continue
+        if any(fingerprint - previous <= 4 for previous in fingerprints):
+            continue
+        selected.append(path)
+        fingerprints.append(fingerprint)
+        if len(selected) >= max_frames:
+            break
+    return selected
+
+
+def _extract_video_frames(path: Path, directory: Path, max_frames: int) -> list[Path]:
+    if max_frames <= 0:
+        return []
+
+    # Prefer real scene transitions: these frames carry more identifying visual
+    # information than arbitrary timestamps for movies/series/videos. The
+    # escaped comma is required by FFmpeg's filter graph parser.
+    scene_filter = (
+        "select=gt(scene\\,0.28),"
+        "scale=1280:-2:force_original_aspect_ratio=decrease"
+    )
+    scene_frames = _extract_with_filter(
+        path,
+        directory / "scene-%02d.jpg",
+        scene_filter,
+        max_frames,
+    )
+    selected = _dedupe_frames(scene_frames, max_frames)
+
+    # Videos with very few cuts (interviews, CCTV, static shots) need temporal
+    # coverage too. Only run the fallback when scene detection did not already
+    # produce enough distinct evidence, avoiding a second full decode normally.
+    minimum_scene_frames = min(max_frames, 4)
+    if len(selected) >= minimum_scene_frames:
+        return selected
+
+    duration = _video_duration(path)
+    interval = max(0.45, duration / max_frames) if duration > 0 else 12.0
+    uniform_filter = (
+        f"fps=1/{interval:.3f},"
+        "scale=1280:-2:force_original_aspect_ratio=decrease"
+    )
+    uniform_frames = _extract_with_filter(
+        path,
+        directory / "uniform-%02d.jpg",
+        uniform_filter,
+        max_frames,
+    )
+    return _dedupe_frames(scene_frames + uniform_frames, max_frames)
 
 
 def _video_transcript(path: Path, work: Path) -> str:

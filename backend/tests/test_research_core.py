@@ -10,6 +10,7 @@ from app.research import (
     _cache_get,
     _cache_put,
     _candidate_from_item,
+    _evidence_summary,
     _canonical_http_url,
     _has_verifiable_evidence,
     _image_hash_variants,
@@ -314,3 +315,27 @@ def test_in_memory_cache_is_bounded_and_lru() -> None:
     _cache_put(cache, "c", 3, 2, now=4.0)
 
     assert set(cache) == {"a", "c"}
+
+
+def test_evidence_summary_prefers_sentences_matching_the_clues() -> None:
+    page = (
+        "Welcome to our entertainment archive. "
+        "This page contains cast and release information. "
+        "The hero leaves the village for the city and works as a driver. "
+        "In the ending he does not marry the heroine and returns home. "
+        "Copyright and navigation links follow."
+    )
+    queries = [
+        "hero village city",
+        "ending does not marry heroine",
+    ]
+
+    summary = _evidence_summary(page, queries)
+
+    assert "leaves the village for the city" in summary
+    assert "does not marry the heroine" in summary
+    assert "Copyright" not in summary
+
+
+def test_evidence_summary_uses_fallback_when_page_is_unavailable() -> None:
+    assert _evidence_summary("", ["query"], fallback=" search snippet  ") == "search snippet"

@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import re
 import socket
+import time
+from collections import defaultdict
 from urllib.parse import urljoin, urlparse
 
 import httpx
@@ -21,6 +24,7 @@ _NETWORK_ERRORS = (
 _BLOCKED_HOST_SUFFIXES = (".localhost", ".local", ".internal", ".home.arpa")
 _REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 _MAX_REDIRECTS = 5
+_PROFILE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
 
 
 def _public_ip(value: str) -> bool:
@@ -28,6 +32,40 @@ def _public_ip(value: str) -> bool:
         return ipaddress.ip_address(value.split("%", 1)[0]).is_global
     except ValueError:
         return False
+
+
+def _valid_proxy_url(value: str) -> bool:
+    try:
+        parsed = urlparse(value)
+        return parsed.scheme in {"http", "https"} and bool(parsed.hostname)
+    except ValueError:
+        return False
+
+
+def parse_proxy_profiles(primary: str, extras: str) -> dict[str, str]:
+    """Parse backward-compatible server proxy exits.
+
+    `EGRESS_PROXY_URL` remains the `vpn` profile. `EGRESS_PROXY_URLS` accepts
+    comma/semicolon separated `name=http://proxy:port` entries. Invalid profile
+    names/URLs are ignored rather than handed to httpx.
+    """
+    profiles: dict[str, str] = {}
+    primary = primary.strip()
+    if primary and _valid_proxy_url(primary):
+        profiles["vpn"] = primary
+
+    for entry in re.split(r"[;,]", extras):
+        entry = entry.strip()
+        if not entry or "=" not in entry:
+            continue
+        name, value = (part.strip() for part in entry.split("=", 1))
+        name = name.casefold()
+        if name == "direct" or not _PROFILE_NAME_RE.fullmatch(name):
+            continue
+        if not _valid_proxy_url(value):
+            continue
+        profiles.setdefault(name, value)
+    return profiles
 
 
 async def public_web_target(url: str) -> bool:
@@ -69,13 +107,15 @@ async def public_web_target(url: str) -> bool:
 
 
 class EgressRouter:
-    """Route public web requests through direct or VPN-backed proxy egress.
+    """Route public web requests through direct or server-side proxy exits.
 
     Every redirect target is validated before the next request so a public URL
-    cannot redirect the research worker into loopback/private/link-local space.
-    In auto mode a successful route remains sticky per original host. Route
-    switching happens only for transport failures or HTTP 451, never for
-    application-level denials such as 403/429/CAPTCHA pages.
+    cannot redirect the worker into loopback/private/link-local space.
+
+    In `auto` mode a successful route stays sticky for the original host. A
+    route switch is allowed only for transport failures or HTTP 451. 403/429
+    and application-level denials never trigger another exit. Repeated transport
+    failures temporarily open a small circuit breaker for that route.
     """
 
     def __init__(self, *, timeout: httpx.Timeout, headers: dict[str, str]):
@@ -83,45 +123,79 @@ class EgressRouter:
         if mode not in {"auto", "direct", "vpn"}:
             mode = "auto"
         self.mode = mode
-        self.proxy_url = settings.egress_proxy_url.strip() or None
+        self.proxy_profiles = parse_proxy_profiles(
+            settings.egress_proxy_url,
+            settings.egress_proxy_urls,
+        )
         self._sticky: dict[str, str] = {}
         self._safe_targets: dict[tuple[str, int | None], bool] = {}
+        self._failure_streak: defaultdict[str, int] = defaultdict(int)
+        self._blocked_until: dict[str, float] = {}
         self._direct = httpx.AsyncClient(timeout=timeout, headers=headers, follow_redirects=False)
-        self._vpn = (
-            httpx.AsyncClient(timeout=timeout, headers=headers, follow_redirects=False, proxy=self.proxy_url)
-            if self.proxy_url
-            else None
-        )
+        self._proxies = {
+            name: httpx.AsyncClient(
+                timeout=timeout,
+                headers=headers,
+                follow_redirects=False,
+                proxy=url,
+            )
+            for name, url in self.proxy_profiles.items()
+        }
+        # Compatibility for existing diagnostics/tests referring to `_vpn`.
+        self._vpn = self._proxies.get("vpn")
 
     async def __aenter__(self) -> "EgressRouter":
         return self
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
         await self._direct.aclose()
-        if self._vpn is not None:
-            await self._vpn.aclose()
+        for client in self._proxies.values():
+            await client.aclose()
+
+    def _route_is_open(self, route: str) -> bool:
+        blocked_until = self._blocked_until.get(route, 0.0)
+        return blocked_until <= time.monotonic()
+
+    def _record_success(self, route: str) -> None:
+        self._failure_streak.pop(route, None)
+        self._blocked_until.pop(route, None)
+
+    def _record_transport_failure(self, route: str) -> None:
+        streak = self._failure_streak[route] + 1
+        self._failure_streak[route] = streak
+        if streak >= 2:
+            cooldown = min(60.0, 5.0 * (2 ** min(streak - 2, 4)))
+            self._blocked_until[route] = time.monotonic() + cooldown
 
     def _routes(self, url: str) -> list[str]:
         host = (urlparse(url).hostname or "").casefold()
         if self.mode == "direct":
             return ["direct"]
+
+        proxy_routes = list(self._proxies)
         if self.mode == "vpn":
-            if self._vpn is None:
-                raise RuntimeError("EGRESS_MODE=vpn requires EGRESS_PROXY_URL")
-            return ["vpn"]
+            if not proxy_routes:
+                raise RuntimeError("EGRESS_MODE=vpn requires EGRESS_PROXY_URL or EGRESS_PROXY_URLS")
+            available = [route for route in proxy_routes if self._route_is_open(route)]
+            return available or proxy_routes
+
+        available = ["direct", *proxy_routes]
+        healthy = [route for route in available if self._route_is_open(route)]
+        if healthy:
+            available = healthy
 
         sticky = self._sticky.get(host)
-        available = ["direct"] + (["vpn"] if self._vpn is not None else [])
         if sticky in available:
             return [sticky] + [route for route in available if route != sticky]
         return available
 
     def _client(self, route: str) -> httpx.AsyncClient:
-        if route == "vpn":
-            if self._vpn is None:
-                raise RuntimeError("VPN egress is unavailable")
-            return self._vpn
-        return self._direct
+        if route == "direct":
+            return self._direct
+        client = self._proxies.get(route)
+        if client is None:
+            raise RuntimeError(f"egress route is unavailable: {route}")
+        return client
 
     async def _target_allowed(self, url: str) -> bool:
         try:
@@ -234,11 +308,13 @@ class EgressRouter:
                     )
                     continue
                 response.raise_for_status()
+                self._record_success(route)
                 if host:
                     self._sticky[host] = route
                 return response
             except _NETWORK_ERRORS as exc:
                 last_error = exc
+                self._record_transport_failure(route)
                 if index + 1 < len(routes):
                     continue
                 raise
@@ -272,11 +348,13 @@ class EgressRouter:
                     )
                     continue
                 response.raise_for_status()
+                self._record_success(route)
                 if host:
                     self._sticky[host] = route
                 return response, body
             except _NETWORK_ERRORS as exc:
                 last_error = exc
+                self._record_transport_failure(route)
                 if index + 1 < len(routes):
                     continue
                 raise

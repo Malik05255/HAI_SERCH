@@ -77,11 +77,17 @@ class LocalArchiveStore {
     String? mediaFileName;
     String? mediaName;
     try {
-      if (job.inputType != 'text') {
-        if (!job.mediaAvailable) throw StateError('media-not-available');
-        final downloaded = await ApiClient(enableRealtime: false).downloadMedia(job.id, dir);
-        mediaFileName = downloaded.uri.pathSegments.last;
-        mediaName = job.inputType == 'video' ? 'الفيديو الأصلي' : 'الصورة الأصلية';
+      if (job.inputType != 'text' && job.mediaAvailable) {
+        try {
+          final downloaded = await ApiClient(enableRealtime: false).downloadMedia(job.id, dir);
+          mediaFileName = downloaded.uri.pathSegments.last;
+          mediaName = job.inputType == 'video' ? 'الفيديو الأصلي' : 'الصورة الأصلية';
+        } catch (error) {
+          // The worker may finish and purge the temporary upload between the
+          // last job refresh and this archive action. In that privacy-safe
+          // race, keep the result snapshot instead of failing the archive.
+          if (!error.toString().contains('HTTP 404')) rethrow;
+        }
       }
 
       final payload = <String, dynamic>{

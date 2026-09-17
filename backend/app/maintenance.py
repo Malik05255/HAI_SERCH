@@ -1,4 +1,5 @@
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from sqlalchemy import select
@@ -61,3 +62,19 @@ def cleanup_orphan_uploads(db: Session, *, now_epoch: float | None = None) -> in
     }
     cutoff = (now_epoch if now_epoch is not None else time.time()) - ttl_hours * 3600
     return prune_orphan_files(Path(settings.data_dir, "uploads"), referenced, cutoff)
+
+
+def recover_interrupted_jobs(db: Session) -> int:
+    """Return jobs left as running by a previous worker process back to the queue."""
+    jobs = list(db.scalars(select(Job).where(Job.status == "running")).all())
+    if not jobs:
+        return 0
+
+    now = datetime.now(timezone.utc)
+    for job in jobs:
+        job.status = "queued"
+        job.stop_requested = False
+        job.next_run_at = now
+        job.heartbeat_at = None
+    db.commit()
+    return len(jobs)

@@ -20,9 +20,15 @@ def claim_next_job(db: Session) -> Job | None:
         db.rollback()
         return None
 
+    now = utcnow()
     head = db.execute(
         select(Job)
-        .where(Job.account_id.is_not(None), Job.status.in_(ACTIVE_STATES))
+        .where(
+            Job.account_id.is_not(None),
+            Job.status == "queued",
+            Job.stop_requested.is_(False),
+            Job.next_run_at <= now,
+        )
         .order_by(Job.created_at.asc(), Job.id.asc())
         .with_for_update(skip_locked=True)
         .limit(1)
@@ -31,12 +37,9 @@ def claim_next_job(db: Session) -> Job | None:
     if head is None:
         db.commit()
         return None
-    if head.status != "queued" or head.stop_requested or head.next_run_at > utcnow():
-        db.commit()
-        return None
 
     head.status = "running"
-    head.heartbeat_at = utcnow()
+    head.heartbeat_at = now
     head.attempts += 1
     db.commit()
     db.refresh(head)

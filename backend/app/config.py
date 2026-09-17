@@ -40,7 +40,11 @@ class Settings(BaseSettings):
     cloud_media_quota_gb: int = 20
     temp_file_ttl_hours: int = 24
 
+    # Public web egress only. SearXNG and other Docker-internal services always
+    # stay on the direct internal network and are never sent through this proxy.
+    egress_mode: str = "auto"  # auto | direct | vpn
     egress_proxy_url: str = ""
+
     github_repository: str = "Malik05255/HAI_SERCH"
 
 

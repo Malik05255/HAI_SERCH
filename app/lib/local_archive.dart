@@ -67,19 +67,10 @@ class LocalArchiveStore {
     return dir;
   }
 
-  // Kept for client compatibility. Source media is intentionally not copied
-  // into app storage at upload time; cloud storage is the shared source until
-  // the user explicitly archives the task on a device.
-  Future<void> rememberSource(String jobId, String sourcePath, String originalName) async {}
-
-  Future<bool> hasPendingMedia(String jobId) async => false;
-
   Future<void> archiveJob(SearchJob job, List<SearchResult> results) async {
     final root = await _archiveRoot();
     final dir = Directory('${root.path}${Platform.pathSeparator}${job.id}');
 
-    // Build archives atomically enough for user-facing behavior: remove any
-    // incomplete previous attempt, recreate the folder, then write metadata last.
     if (await dir.exists()) await dir.delete(recursive: true);
     await dir.create(recursive: true);
 
@@ -134,10 +125,6 @@ class LocalArchiveStore {
     }
     items.sort((a, b) => b.archivedAt.compareTo(a.archivedAt));
     return items;
-  }
-
-  Future<void> discardPending(String jobId) async {
-    // No pending local copy is created anymore.
   }
 
   Future<void> deleteArchive(String jobId) async {

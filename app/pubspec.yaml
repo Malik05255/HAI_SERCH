@@ -4,7 +4,7 @@ publish_to: "none"
 version: 0.3.0+3
 
 environment:
-  sdk: ">=3.5.0 <4.0.0"
+  sdk: ">=3.6.0 <4.0.0"
 
 dependencies:
   flutter:
@@ -16,6 +16,8 @@ dependencies:
   path_provider: ^2.1.5
   open_filex: ^4.6.0
   flutter_secure_storage: ^9.2.4
+  firebase_core: ^4.15.0
+  firebase_messaging: ^16.7.0
 
 dev_dependencies:
   flutter_test:

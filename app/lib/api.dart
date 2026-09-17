@@ -5,6 +5,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
 
 import 'models.dart';
+import 'notification_service.dart';
 
 class ApiClient {
   ApiClient();
@@ -31,6 +32,7 @@ class ApiClient {
       await _register();
     }
     _initialized = true;
+    await NotificationService.initialize();
   }
 
   Future<void> _register() async {
@@ -50,6 +52,7 @@ class ApiClient {
     await _storage.write(key: 'deep_search_device_token', value: token);
     final id = payload['device_id'] as String?;
     if (id != null) await _storage.write(key: 'deep_search_device_id', value: id);
+    await NotificationService.refreshRegistration();
   }
 
   Future<void> _recoverAuth() async {

@@ -15,13 +15,12 @@ if manifest.exists():
     text = text.replace('android:label="deep_search"', 'android:label="البحث العميق"')
     manifest.write_text(text, encoding="utf-8")
 
-# Latest Flutter templates use build.gradle.kts. Keep compileSdk high enough for
-# current AndroidX / Flutter plugin metadata while leaving targetSdk/minSdk under
-# Flutter's defaults so runtime behavior does not change just to satisfy compile.
+# Keep Android metadata explicit and reproducible for current Flutter/Firebase plugins.
 gradle = ROOT / "android" / "app" / "build.gradle.kts"
 if gradle.exists():
     text = gradle.read_text(encoding="utf-8")
     text = text.replace("compileSdk = flutter.compileSdkVersion", "compileSdk = 36")
+    text = text.replace("minSdk = flutter.minSdkVersion", "minSdk = 23")
 
     old = 'signingConfig = signingConfigs.getByName("debug")'
     new = '''signingConfig = signingConfigs.create("release") {

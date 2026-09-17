@@ -24,6 +24,10 @@ class Settings(BaseSettings):
 
     video_max_upload_mb: int = 250
     video_max_keyframes: int = 12
+    video_transcribe_max_seconds: int = 300
+    whisper_enabled: bool = True
+    whisper_cli_path: str = "/usr/local/bin/whisper-cli"
+    whisper_model_path: str = "/opt/whisper.cpp/models/ggml-tiny.bin"
     cloud_media_quota_gb: int = 20
     temp_file_ttl_hours: int = 24
 

@@ -153,7 +153,7 @@ def process_one() -> bool:
             existing = {r.url: r for r in db.scalars(select(Result).where(Result.job_id == job.id)).all()}
             for candidate in candidates:
                 evidence = {
-                    "verified_page": bool(candidate.summary),
+                    "verified_page": candidate.page_verified,
                     "attempt": job.attempts,
                     "planner_used": bool(planned_queries),
                     "media_enriched": bool(features.get("ocr") or features.get("transcript") or features.get("vision")),

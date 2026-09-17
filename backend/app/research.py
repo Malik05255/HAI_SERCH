@@ -210,6 +210,47 @@ def _candidate_from_item(item: dict) -> Candidate | None:
     )
 
 
+def _preliminary_candidates(
+    raw: dict[str, Candidate],
+    verify_pages: int,
+    *,
+    has_visual_refs: bool,
+) -> list[Candidate]:
+    """Keep text relevance while reserving equal budget for visual candidates.
+
+    For media searches an exact visual source can have a weak title/snippet. If
+    we truncate only by text before hashing images, that source never reaches
+    visual verification. The total preliminary budget stays at 2x verify_pages;
+    we simply reserve up to half for image-bearing candidates in discovery order.
+    """
+    limit = max(verify_pages * 2, verify_pages)
+    text_ranked = sorted(raw.values(), key=lambda candidate: candidate.score, reverse=True)
+    if not has_visual_refs:
+        return text_ranked[:limit]
+
+    selected: list[Candidate] = []
+    seen: set[str] = set()
+
+    def add(candidate: Candidate) -> None:
+        if candidate.url in seen or len(selected) >= limit:
+            return
+        selected.append(candidate)
+        seen.add(candidate.url)
+
+    for candidate in text_ranked[:verify_pages]:
+        add(candidate)
+    for candidate in raw.values():
+        if candidate.image_url:
+            add(candidate)
+        if len(selected) >= limit:
+            break
+    for candidate in text_ranked:
+        add(candidate)
+        if len(selected) >= limit:
+            break
+    return selected
+
+
 async def run_research(
     query: str,
     attempt: int,
@@ -271,7 +312,11 @@ async def run_research(
             if queries and successful_search_requests == 0:
                 raise RuntimeError("search_backend_unavailable")
 
-            prelim = sorted(raw.values(), key=lambda c: c.score, reverse=True)[: max(budget.verify_pages * 2, budget.verify_pages)]
+            prelim = _preliminary_candidates(
+                raw,
+                budget.verify_pages,
+                has_visual_refs=bool(reference_hashes),
+            )
             sem = asyncio.Semaphore(budget.http_concurrency)
 
             if reference_hashes:

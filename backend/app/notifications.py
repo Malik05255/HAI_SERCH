@@ -1,5 +1,6 @@
 import base64
 import json
+from datetime import datetime, timezone
 from functools import lru_cache
 
 import httpx
@@ -9,10 +10,11 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .config import settings
-from .models import Device, Job
+from .models import Device, Job, NotificationDelivery
 
 
 FCM_SCOPE = "https://www.googleapis.com/auth/firebase.messaging"
+_TERMINAL_DELIVERY_STATES = {"sent", "discarded"}
 
 
 def notification_text(job: Job) -> tuple[str, str]:
@@ -45,20 +47,24 @@ def _firebase_credentials():
         return None
 
 
-def send_job_pushes(db: Session, job: Job) -> bool:
-    """Send a completion notification without affecting research state.
+def _delivery_map(db: Session, job_id: str) -> dict[str, NotificationDelivery]:
+    rows = list(
+        db.scalars(
+            select(NotificationDelivery).where(NotificationDelivery.job_id == job_id)
+        ).all()
+    )
+    return {row.device_id: row for row in rows}
 
-    True means this job no longer needs a retry. A configured notification
-    service with missing/invalid credentials returns False so PostgreSQL keeps
-    the delivery pending across worker restarts. No registered push-capable
-    device is considered handled because there is nothing to notify yet.
+
+def send_job_pushes(db: Session, job: Job) -> bool:
+    """Deliver completion notifications independently to each registered device.
+
+    A successful device is persisted as ``sent`` and is never notified again for
+    this completion cycle. Invalid tokens become ``discarded``. Transient failures
+    remain ``pending`` so the runtime retries only those devices after restarts.
     """
     if not settings.notifications_enabled or not job.account_id:
         return True
-
-    firebase = _firebase_credentials()
-    if firebase is None:
-        return False
 
     devices = list(
         db.scalars(
@@ -71,6 +77,30 @@ def send_job_pushes(db: Session, job: Job) -> bool:
     devices = [device for device in devices if (device.push_token or "").strip()]
     if not devices:
         return True
+
+    deliveries = _delivery_map(db, job.id)
+    created = False
+    for device in devices:
+        if device.id in deliveries:
+            continue
+        delivery = NotificationDelivery(job_id=job.id, device_id=device.id, state="pending")
+        db.add(delivery)
+        deliveries[device.id] = delivery
+        created = True
+    if created:
+        db.commit()
+
+    pending_devices = [
+        device
+        for device in devices
+        if deliveries[device.id].state not in _TERMINAL_DELIVERY_STATES
+    ]
+    if not pending_devices:
+        return True
+
+    firebase = _firebase_credentials()
+    if firebase is None:
+        return False
 
     credentials, project_id = firebase
     try:
@@ -88,11 +118,11 @@ def send_job_pushes(db: Session, job: Job) -> bool:
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json",
     }
-    success = False
     changed = False
 
     with httpx.Client(timeout=12.0, headers=headers) as client:
-        for device in devices:
+        for device in pending_devices:
+            delivery = deliveries[device.id]
             payload = {
                 "message": {
                     "token": device.push_token,
@@ -109,16 +139,21 @@ def send_job_pushes(db: Session, job: Job) -> bool:
             try:
                 response = client.post(endpoint, json=payload)
                 if 200 <= response.status_code < 300:
-                    success = True
+                    delivery.state = "sent"
+                    delivery.sent_at = datetime.now(timezone.utc)
+                    changed = True
                     continue
                 if response.status_code in {400, 404} and "UNREGISTERED" in response.text.upper():
                     device.push_token = None
+                    delivery.state = "discarded"
                     changed = True
             except Exception:
                 continue
 
     if changed:
         db.commit()
-    # Once at least one device received the completion notification, do not
-    # retry the same job and risk duplicate notifications on that device.
-    return success or changed
+
+    return all(
+        deliveries[device.id].state in _TERMINAL_DELIVERY_STATES
+        for device in devices
+    )

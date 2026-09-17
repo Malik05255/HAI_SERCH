@@ -28,6 +28,21 @@ def ensure_schema() -> None:
         connection.exec_driver_sql("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS notification_sent_at TIMESTAMPTZ NULL")
         connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_jobs_notification_pending ON jobs (notification_pending)")
         connection.exec_driver_sql("ALTER TABLE devices ADD COLUMN IF NOT EXISTS push_token TEXT NULL")
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE IF NOT EXISTS notification_deliveries (
+                job_id VARCHAR(36) NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+                device_id VARCHAR(36) NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+                state VARCHAR(16) NOT NULL DEFAULT 'pending',
+                sent_at TIMESTAMPTZ NULL,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (job_id, device_id)
+            )
+            """
+        )
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_notification_deliveries_state ON notification_deliveries (state)"
+        )
 
 
 def get_db():

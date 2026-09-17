@@ -65,6 +65,16 @@ class Job(Base):
     results: Mapped[list["Result"]] = relationship(back_populates="job", cascade="all, delete-orphan")
 
 
+class NotificationDelivery(Base):
+    __tablename__ = "notification_deliveries"
+
+    job_id: Mapped[str] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"), primary_key=True)
+    device_id: Mapped[str] = mapped_column(ForeignKey("devices.id", ondelete="CASCADE"), primary_key=True)
+    state: Mapped[str] = mapped_column(String(16), default="pending", index=True)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
 class Result(Base):
     __tablename__ = "results"
 

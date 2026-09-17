@@ -1165,7 +1165,7 @@ class ResultCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final imageUrl = item.imageUrl?.trim();
     final showImage = imageUrl != null && imageUrl.isNotEmpty;
-    final sourceUri = _safeWebUri(item.url);
+    final sourceUris = item.sourceUris;
 
     return Card(
       clipBehavior: Clip.antiAlias,
@@ -1244,11 +1244,45 @@ class ResultCard extends StatelessWidget {
             ],
             const SizedBox(height: 8),
             TextButton.icon(
-              onPressed: sourceUri == null
+              onPressed: sourceUris.isEmpty
                   ? null
-                  : () => launchUrl(sourceUri, mode: LaunchMode.externalApplication),
+                  : () async {
+                      if (sourceUris.length == 1) {
+                        await launchUrl(sourceUris.first, mode: LaunchMode.externalApplication);
+                        return;
+                      }
+                      if (!context.mounted) return;
+                      await showModalBottomSheet<void>(
+                        context: context,
+                        showDragHandle: true,
+                        builder: (sheetContext) => SafeArea(
+                          child: ListView.separated(
+                            shrinkWrap: true,
+                            padding: const EdgeInsets.fromLTRB(16, 0, 16, 20),
+                            itemCount: sourceUris.length,
+                            separatorBuilder: (_, __) => const Divider(height: 1),
+                            itemBuilder: (_, index) {
+                              final uri = sourceUris[index];
+                              return ListTile(
+                                leading: const Icon(Icons.language_rounded),
+                                title: Text(uri.host.isEmpty ? 'المصدر ${index + 1}' : uri.host),
+                                subtitle: Text(
+                                  uri.toString(),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                                onTap: () async {
+                                  Navigator.pop(sheetContext);
+                                  await launchUrl(uri, mode: LaunchMode.externalApplication);
+                                },
+                              );
+                            },
+                          ),
+                        ),
+                      );
+                    },
               icon: const Icon(Icons.open_in_new_rounded),
-              label: const Text('المصدر'),
+              label: Text(sourceUris.length > 1 ? 'المصادر (${sourceUris.length})' : 'المصدر'),
             ),
           ],
         ),

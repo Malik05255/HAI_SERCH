@@ -10,6 +10,19 @@ SearchResult _result(Map<String, dynamic> evidence) => SearchResult(
       evidence: evidence,
     );
 
+SearchJob _job({String status = 'queued', String? lastError}) => SearchJob.fromJson({
+      'id': 'job-1',
+      'query': 'اختبار',
+      'input_type': 'text',
+      'status': status,
+      'progress': 0,
+      'found_count': 0,
+      'target_results': 10,
+      'attempts': 1,
+      'media_available': false,
+      'last_error': lastError,
+    });
+
 void main() {
   test('sanity', () {
     expect(1 + 1, 2);
@@ -41,6 +54,22 @@ void main() {
 
     expect(image.title, 'بحث بالصورة');
     expect(video.title, 'بحث بالفيديو');
+  });
+
+  test('job retry diagnostics are translated without exposing raw backend errors', () {
+    final vision = _job(lastError: 'visual_analysis_unavailable');
+    final context = _job(status: 'needs_context', lastError: 'insufficient_context');
+    final generic = _job(lastError: 'ConnectError: secret backend detail');
+
+    expect(vision.userErrorLabel, 'التحليل البصري غير متاح حاليًا، وسيعاد المحاولة تلقائيًا');
+    expect(context.userErrorLabel, 'الأدلة الحالية غير كافية لإكمال البحث');
+    expect(generic.userErrorLabel, 'تعذرت آخر محاولة، وسيعاد البحث تلقائيًا');
+    expect(generic.userErrorLabel, isNot(contains('secret')));
+  });
+
+  test('empty retry error is treated as no error', () {
+    expect(_job(lastError: '   ').lastError, isNull);
+    expect(_job(lastError: null).userErrorLabel, isNull);
   });
 
   test('strong visual evidence is explained to the user', () {

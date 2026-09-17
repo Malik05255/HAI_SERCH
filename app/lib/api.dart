@@ -15,6 +15,9 @@ class ApiClient {
     'API_BASE_URL',
     defaultValue: 'http://127.0.0.1:8000',
   );
+  static const String _tokenKey = 'deep_search_device_token';
+  static const String _deviceIdKey = 'deep_search_device_id';
+  static const String _revokedKey = 'deep_search_auth_revoked';
 
   static const FlutterSecureStorage _storage = FlutterSecureStorage();
   final StreamController<void> _jobChanges = StreamController<void>.broadcast();
@@ -48,8 +51,12 @@ class ApiClient {
 
   Future<void> init() async {
     if (_initialized) return;
+    if (!_authRevoked) {
+      _authRevoked = await _storage.read(key: _revokedKey) == '1';
+    }
     if (_authRevoked) throw StateError('device authorization revoked');
-    _token = await _storage.read(key: 'deep_search_device_token');
+
+    _token = await _storage.read(key: _tokenKey);
     if (_token == null || _token!.isEmpty) {
       await _register();
     }
@@ -77,9 +84,10 @@ class ApiClient {
     _token = token;
     _authRevoked = false;
     _realtimeUnauthorized = false;
-    await _storage.write(key: 'deep_search_device_token', value: token);
+    await _storage.delete(key: _revokedKey);
+    await _storage.write(key: _tokenKey, value: token);
     final id = payload['device_id'] as String?;
-    if (id != null) await _storage.write(key: 'deep_search_device_id', value: id);
+    if (id != null) await _storage.write(key: _deviceIdKey, value: id);
     await NotificationService.refreshRegistration();
   }
 
@@ -87,11 +95,12 @@ class ApiClient {
     if (_authRevoked) return;
     _authRevoked = true;
     _realtimeUnauthorized = true;
+    await _storage.write(key: _revokedKey, value: '1');
     await _stopRealtime();
     _token = null;
     _initialized = false;
-    await _storage.delete(key: 'deep_search_device_token');
-    await _storage.delete(key: 'deep_search_device_id');
+    await _storage.delete(key: _tokenKey);
+    await _storage.delete(key: _deviceIdKey);
   }
 
   Future<void> _stopRealtime() async {

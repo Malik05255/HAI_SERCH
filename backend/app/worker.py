@@ -23,11 +23,12 @@ def purge_job_media(job) -> None:
         job.input_url = None
 
 
-def finish_job(db, job, status: str, progress: float | None = None) -> None:
+def finish_job(db, job, status: str, progress: float | None = None, purge_media: bool = True) -> None:
     job.status = status
     if progress is not None:
         job.progress = progress
-    purge_job_media(job)
+    if purge_media:
+        purge_job_media(job)
     db.commit()
 
 
@@ -37,7 +38,7 @@ def process_one() -> bool:
         if job is None:
             return False
         if job.stop_requested:
-            finish_job(db, job, "stopped")
+            finish_job(db, job, "stopped", purge_media=False)
             return True
 
         budget = budget_for_job(job.attempts - 1)
@@ -83,7 +84,7 @@ def process_one() -> bool:
             job.heartbeat_at = utcnow()
 
             if job.stop_requested:
-                finish_job(db, job, "stopped")
+                finish_job(db, job, "stopped", purge_media=False)
             elif job.found_count >= job.target_results:
                 finish_job(db, job, "completed", 1.0)
             elif job.attempts >= settings.search_max_attempts:
@@ -93,7 +94,7 @@ def process_one() -> bool:
                 requeue(db, job)
         except Exception:
             if job.stop_requested:
-                finish_job(db, job, "stopped")
+                finish_job(db, job, "stopped", purge_media=False)
             elif job.attempts >= settings.search_max_attempts:
                 finish_job(db, job, "failed")
             else:

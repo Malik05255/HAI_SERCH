@@ -1,3 +1,4 @@
+import re
 import subprocess
 import tempfile
 from pathlib import Path
@@ -7,6 +8,26 @@ from .config import settings
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
 VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v"}
+UPLOAD_ID_RE = re.compile(r"^[0-9a-f-]{36}(?:\.[a-z0-9]{1,8})?$")
+
+
+def _uploads_root() -> Path:
+    root = Path(settings.data_dir, "uploads")
+    root.mkdir(parents=True, exist_ok=True)
+    return root.resolve()
+
+
+def resolve_upload_id(upload_id: str | None) -> Path | None:
+    """Resolve an opaque upload id to a file inside DATA_DIR/uploads only."""
+    if not upload_id or not UPLOAD_ID_RE.fullmatch(upload_id.casefold()):
+        return None
+    root = _uploads_root()
+    path = (root / upload_id).resolve()
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return None
+    return path if path.is_file() else None
 
 
 def _safe_local_path(value: str | None) -> Path | None:
@@ -14,15 +35,14 @@ def _safe_local_path(value: str | None) -> Path | None:
         return None
     try:
         path = Path(value).resolve(strict=True)
-        root = Path(settings.data_dir).resolve(strict=True)
+        root = _uploads_root()
         path.relative_to(root)
-        return path
+        return path if path.is_file() else None
     except (OSError, ValueError):
         return None
 
 
 def delete_uploaded_media(value: str | None) -> bool:
-    """Delete an uploaded media file only when it is inside DATA_DIR."""
     path = _safe_local_path(value)
     if path is None:
         return False

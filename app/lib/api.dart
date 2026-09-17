@@ -28,6 +28,7 @@ class ApiClient {
   Future<SearchJob> createJob({
     required String query,
     required String inputType,
+    String? uploadId,
     String? inputUrl,
   }) async {
     final response = await http.post(
@@ -36,7 +37,7 @@ class ApiClient {
       body: jsonEncode({
         'query': query,
         'input_type': inputType,
-        'input_url': inputUrl,
+        'upload_id': uploadId ?? inputUrl,
         'target_results': 10,
       }),
     );

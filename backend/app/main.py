@@ -7,14 +7,12 @@ from sqlalchemy.orm import Session
 
 from .config import settings
 from .database import Base, engine, get_db
-from .media import delete_uploaded_media
+from .media import IMAGE_EXTS, VIDEO_EXTS, delete_uploaded_media, resolve_upload_id
 from .models import Job, Result
 from .schemas import JobCreate, JobOut, ResultOut
 
 
-IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
-VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v"}
-app = FastAPI(title=settings.app_name, version="0.1.0")
+app = FastAPI(title=settings.app_name, version="0.2.0")
 
 
 @app.on_event("startup")
@@ -61,15 +59,27 @@ async def upload(file: UploadFile) -> dict:
     else:
         destination.unlink(missing_ok=True)
         raise HTTPException(status_code=415, detail="unsupported media type")
-    return {"input_url": str(destination), "input_type": input_type, "size": written, "temporary": True}
+    # input_url is a compatibility alias containing the opaque id, never a server path.
+    return {"upload_id": key, "input_url": key, "input_type": input_type, "size": written, "temporary": True}
 
 
 @app.post("/v1/jobs", response_model=JobOut, dependencies=[Depends(require_api_key)])
 def create_job(payload: JobCreate, db: Session = Depends(get_db)) -> Job:
+    input_url = None
+    if payload.upload_id:
+        path = resolve_upload_id(payload.upload_id)
+        if path is None:
+            raise HTTPException(status_code=404, detail="temporary upload not found")
+        suffix = path.suffix.casefold()
+        actual_type = "video" if suffix in VIDEO_EXTS else "image" if suffix in IMAGE_EXTS else None
+        if actual_type is None or actual_type != payload.input_type:
+            raise HTTPException(status_code=422, detail="upload type mismatch")
+        input_url = str(path)
+
     job = Job(
         query=payload.query.strip(),
         input_type=payload.input_type,
-        input_url=payload.input_url,
+        input_url=input_url,
         target_results=min(payload.target_results, settings.search_max_results),
     )
     db.add(job)
@@ -101,12 +111,10 @@ def stop_job(job_id: str, db: Session = Depends(get_db)) -> Job:
     job = db.get(Job, job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="job not found")
-    was_running = job.status == "running"
+    if job.status in {"completed", "partial", "failed", "needs_context", "cancelled"}:
+        return job
     job.stop_requested = True
     job.status = "stopped"
-    if not was_running and job.input_url:
-        delete_uploaded_media(job.input_url)
-        job.input_url = None
     db.commit()
     db.refresh(job)
     return job
@@ -117,8 +125,25 @@ def resume_job(job_id: str, db: Session = Depends(get_db)) -> Job:
     job = db.get(Job, job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="job not found")
+    if job.status != "stopped":
+        return job
     job.stop_requested = False
     job.status = "queued"
+    db.commit()
+    db.refresh(job)
+    return job
+
+
+@app.post("/v1/jobs/{job_id}/cancel", response_model=JobOut, dependencies=[Depends(require_api_key)])
+def cancel_job(job_id: str, db: Session = Depends(get_db)) -> Job:
+    job = db.get(Job, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    job.stop_requested = True
+    job.status = "cancelled"
+    if job.input_url:
+        delete_uploaded_media(job.input_url)
+        job.input_url = None
     db.commit()
     db.refresh(job)
     return job

@@ -23,6 +23,7 @@ jobs:
     outputs:
       release_tag: ${{ steps.meta.outputs.release_tag }}
       release_version: ${{ steps.meta.outputs.release_version }}
+      prerelease: ${{ steps.meta.outputs.prerelease }}
     env:
       API_BASE_URL: ${{ secrets.API_BASE_URL }}
       ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
@@ -69,6 +70,11 @@ jobs:
           }
           echo "release_tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "release_version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          if [[ "$TAG" == *-rc.* || "$TAG" == *-beta.* || "$TAG" == *-alpha.* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
 
   android:
     needs: validate
@@ -190,6 +196,7 @@ jobs:
           target_commitish: ${{ github.sha }}
           name: البحث العميق ${{ needs.validate.outputs.release_tag }}
           generate_release_notes: true
+          prerelease: ${{ needs.validate.outputs.prerelease }}
           files: |
             dist/deep-search-android.apk
             dist/deep-search-android.apk.sha256

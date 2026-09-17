@@ -23,7 +23,7 @@ String _friendlyError(Object error, String fallback) {
     return 'تم سحب صلاحية هذا الجهاز. اربطه من الإعدادات برمز جديد.';
   }
   if (text.contains('HTTP 429')) return 'الطابور ممتلئ 5/5';
-  if (text.contains('HTTP 413')) return 'الملف أكبر من الحد المسموح';
+  if (text.contains('HTTP 413')) return 'الحد المسموح للسياق أو الملف تم تجاوزه';
   if (text.contains('HTTP 415')) return 'صيغة الملف غير مدعومة أو محتواه غير صالح';
   return fallback;
 }
@@ -32,6 +32,61 @@ Uri? _safeWebUri(String value) {
   final uri = Uri.tryParse(value.trim());
   if (uri == null || !const {'http', 'https'}.contains(uri.scheme)) return null;
   return uri;
+}
+
+Future<bool> _submitClue(
+  BuildContext context,
+  ApiClient api,
+  SearchJob job,
+) async {
+  final controller = TextEditingController();
+  final clue = await showDialog<String>(
+    context: context,
+    builder: (dialogContext) => AlertDialog(
+      title: const Text('إضافة معلومة للبحث'),
+      content: TextField(
+        controller: controller,
+        autofocus: true,
+        minLines: 3,
+        maxLines: 6,
+        maxLength: 1500,
+        decoration: const InputDecoration(
+          hintText: 'مثال: أتذكر أن النهاية كانت في محطة قطار، أو أن الممثل كان طبيبًا...',
+          border: OutlineInputBorder(),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(dialogContext),
+          child: const Text('إلغاء'),
+        ),
+        FilledButton.icon(
+          onPressed: () => Navigator.pop(dialogContext, controller.text.trim()),
+          icon: const Icon(Icons.add_comment_outlined),
+          label: const Text('إضافة'),
+        ),
+      ],
+    ),
+  );
+  controller.dispose();
+  if (clue == null || clue.trim().isEmpty) return false;
+
+  try {
+    await api.addClue(job.id, clue);
+    if (!context.mounted) return true;
+    _snack(
+      context,
+      job.status == 'stopped'
+          ? 'تمت إضافة المعلومة، وستستخدم عند متابعة البحث'
+          : 'تمت إضافة المعلومة وإعادة تقييم النتائج بالسياق الجديد',
+    );
+    return true;
+  } catch (error) {
+    if (context.mounted) {
+      _snack(context, _friendlyError(error, 'تعذر إضافة المعلومة'));
+    }
+    return false;
+  }
 }
 
 class DeepSearchApp extends StatefulWidget {
@@ -866,7 +921,10 @@ class JobCard extends StatelessWidget {
 
   Future<void> _runAction(BuildContext context, String value) async {
     try {
-      if (value == 'archive') {
+      if (value == 'clue') {
+        final added = await _submitClue(context, api, job);
+        if (added) await onChanged();
+      } else if (value == 'archive') {
         if (job.isActive) {
           final confirmed = await _confirm(
             context,
@@ -952,6 +1010,15 @@ class JobCard extends StatelessWidget {
                   PopupMenuButton<String>(
                     onSelected: (value) => _runAction(context, value),
                     itemBuilder: (_) => [
+                      if (job.status != 'cancelled')
+                        const PopupMenuItem(
+                          value: 'clue',
+                          child: ListTile(
+                            contentPadding: EdgeInsets.zero,
+                            leading: Icon(Icons.add_comment_outlined),
+                            title: Text('إضافة معلومة'),
+                          ),
+                        ),
                       if (job.status == 'running' || job.status == 'queued')
                         const PopupMenuItem(value: 'stop', child: Text('إيقاف مؤقت')),
                       if (job.status == 'stopped')
@@ -1195,7 +1262,7 @@ class _ResultsPageState extends State<ResultsPage> {
       if (mounted) {
         setState(() {
           results = data;
-          if (updated != null) currentJob = updated!;
+          if (updated != null) currentJob = updated;
           errorText = null;
         });
       }
@@ -1207,6 +1274,11 @@ class _ResultsPageState extends State<ResultsPage> {
       refreshing = false;
       if (!silent && mounted) setState(() => loading = false);
     }
+  }
+
+  Future<void> addClue() async {
+    final added = await _submitClue(context, widget.api, currentJob);
+    if (added) await load(silent: true);
   }
 
   Future<void> openCloudMedia() async {
@@ -1279,6 +1351,14 @@ class _ResultsPageState extends State<ResultsPage> {
                   ),
                   const SizedBox(height: 12),
                   if (errorText != null) _ErrorBanner(text: errorText!),
+                  if (currentJob.status != 'cancelled') ...[
+                    OutlinedButton.icon(
+                      onPressed: acting ? null : addClue,
+                      icon: const Icon(Icons.add_comment_outlined),
+                      label: const Text('إضافة معلومة للبحث'),
+                    ),
+                    const SizedBox(height: 10),
+                  ],
                   if (currentJob.mediaAvailable) ...[
                     FilledButton.tonalIcon(
                       onPressed: acting ? null : openCloudMedia,

@@ -25,6 +25,9 @@ String _friendlyError(Object error, String fallback) {
   if (text.contains('HTTP 429')) return 'الطابور ممتلئ 5/5';
   if (text.contains('HTTP 413')) return 'الحد المسموح للسياق أو الملف تم تجاوزه';
   if (text.contains('HTTP 415')) return 'صيغة الملف غير مدعومة أو محتواه غير صالح';
+  if (text.contains('HTTP 409') && text.contains('media was purged')) {
+    return 'حُذف المرفق الأصلي بعد انتهاء البحث. ارفعه من جديد لبدء بحث جديد.';
+  }
   return fallback;
 }
 
@@ -36,7 +39,12 @@ Future<void> _offerVerifiedUpdate(
   final update = await service.check();
   if (!context.mounted) return;
   if (update == null) {
-    if (announceLatest) _snack(context, 'أنت على آخر إصدار');
+    if (announceLatest) {
+      _snack(
+        context,
+        service.lastCheckFailed ? 'تعذر التحقق من التحديث' : 'أنت على آخر إصدار',
+      );
+    }
     return;
   }
 
@@ -989,7 +997,7 @@ class JobCard extends StatelessWidget {
         final confirmed = await _confirm(
           context,
           'حذف المهمة',
-          'سيتم حذف المهمة ونتائجها ومرفقها من السحابة.',
+          'سيتم حذف المهمة ونتائجها وأي مرفق مؤقت متبقٍ على السيرفر.',
         );
         if (!confirmed) return;
         if (job.status == 'running') await api.action(job.id, 'cancel');
@@ -999,7 +1007,7 @@ class JobCard extends StatelessWidget {
         final confirmed = await _confirm(
           context,
           'إلغاء البحث',
-          'سيتم إيقاف البحث وحذف المرفق من السحابة.',
+          'سيتم إيقاف البحث وحذف المرفق المؤقت من السيرفر.',
         );
         if (!confirmed) return;
         await api.action(job.id, 'cancel');
@@ -1056,12 +1064,12 @@ class JobCard extends StatelessWidget {
                   if (job.mediaAvailable)
                     const Padding(
                       padding: EdgeInsets.only(top: 8),
-                      child: Icon(Icons.cloud_done_outlined, size: 18),
+                      child: Icon(Icons.cloud_upload_outlined, size: 18),
                     ),
                   PopupMenuButton<String>(
                     onSelected: (value) => _runAction(context, value),
                     itemBuilder: (_) => [
-                      if (job.status != 'cancelled')
+                      if (job.canAddClue)
                         const PopupMenuItem(
                           value: 'clue',
                           child: ListTile(
@@ -1402,7 +1410,7 @@ class _ResultsPageState extends State<ResultsPage> {
                   ),
                   const SizedBox(height: 12),
                   if (errorText != null) _ErrorBanner(text: errorText!),
-                  if (currentJob.status != 'cancelled') ...[
+                  if (currentJob.canAddClue) ...[
                     OutlinedButton.icon(
                       onPressed: acting ? null : addClue,
                       icon: const Icon(Icons.add_comment_outlined),
@@ -1647,8 +1655,8 @@ class _SettingsPageState extends State<SettingsPage> {
           onTap: checkServer,
         ),
         ListTile(
-          leading: const Icon(Icons.cloud_queue_rounded),
-          title: const Text('مساحة الوسائط السحابية'),
+          leading: const Icon(Icons.cloud_upload_outlined),
+          title: const Text('مساحة الرفع المؤقت'),
           subtitle: Text(storageLabel),
           onTap: loadStorage,
         ),

@@ -20,7 +20,7 @@ jobs:
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
-      - run: flutter create --platforms=android --project-name deep_search .
+      - run: flutter create --platforms=android --org com.hai --project-name deep_search .
         working-directory: app
       - name: Restore Android signing key
         env:
@@ -35,7 +35,12 @@ jobs:
         working-directory: app
       - name: Build APK
         working-directory: app
-        run: flutter build apk --release --dart-define=API_BASE_URL=${{ secrets.API_BASE_URL }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          flutter build apk --release \
+            --build-name="$VERSION" \
+            --build-number="$GITHUB_RUN_NUMBER" \
+            --dart-define=API_BASE_URL=${{ secrets.API_BASE_URL }}
       - run: cp app/build/app/outputs/flutter-apk/app-release.apk deep-search-android.apk
       - uses: actions/upload-artifact@v4
         with:
@@ -58,7 +63,10 @@ jobs:
         working-directory: app
       - name: Build Windows
         working-directory: app
-        run: flutter build windows --release --dart-define=API_BASE_URL=${{ secrets.API_BASE_URL }}
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart('v')
+          flutter build windows --release --build-name=$version --build-number=${{ github.run_number }} --dart-define=API_BASE_URL=${{ secrets.API_BASE_URL }}
       - name: Install Inno Setup
         run: choco install innosetup --no-progress -y
       - name: Build installer

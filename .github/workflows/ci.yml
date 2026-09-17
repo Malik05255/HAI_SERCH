@@ -44,6 +44,10 @@ jobs:
       - run: flutter create --platforms=android --org com.hai --project-name deep_search .
         working-directory: app
       - run: python scripts/prepare_platforms.py
+      - name: Generate Android launcher assets
+        run: |
+          python -m pip install pillow
+          python scripts/generate_icon.py
       - run: flutter pub get
         working-directory: app
       - run: flutter analyze --no-fatal-infos
@@ -67,6 +71,10 @@ jobs:
       - run: flutter create --platforms=windows --project-name deep_search .
         working-directory: app
       - run: python scripts/prepare_platforms.py
+      - name: Generate Windows icon assets
+        run: |
+          python -m pip install pillow
+          python scripts/generate_icon.py
       - run: flutter pub get
         working-directory: app
       - name: Build Windows debug

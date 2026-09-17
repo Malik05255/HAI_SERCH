@@ -67,6 +67,19 @@ void main() {
     expect(generic.userErrorLabel, isNot(contains('secret')));
   });
 
+  test('terminal diagnostics do not promise another retry', () {
+    final visionFailed = _job(status: 'failed', lastError: 'visual_analysis_unavailable');
+    final searchFailed = _job(status: 'failed', lastError: 'RuntimeError: search_backend_unavailable');
+
+    expect(visionFailed.userErrorLabel, 'تعذر التحليل البصري بعد عدة محاولات');
+    expect(searchFailed.userErrorLabel, 'تعذر الوصول إلى محرك البحث بعد عدة محاولات');
+  });
+
+  test('temporary search backend outage explains automatic retry', () {
+    final job = _job(lastError: 'RuntimeError: search_backend_unavailable');
+    expect(job.userErrorLabel, 'محرك البحث غير متاح مؤقتًا، وسيعاد المحاولة تلقائيًا');
+  });
+
   test('empty retry error is treated as no error', () {
     expect(_job(lastError: '   ').lastError, isNull);
     expect(_job(lastError: null).userErrorLabel, isNull);

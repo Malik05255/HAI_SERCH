@@ -49,7 +49,12 @@ def _query_chunks(text: str) -> list[str]:
     middle = max(0, len(clean) // 2 - size // 2)
     chunks.append(clean[middle : middle + size])
     seen: set[str] = set()
-    return [chunk for chunk in chunks if chunk and not (chunk in seen or seen.add(chunk))]
+    unique: list[str] = []
+    for chunk in chunks:
+        if chunk and chunk not in seen:
+            seen.add(chunk)
+            unique.append(chunk)
+    return unique
 
 
 def make_queries(query: str, attempt: int) -> list[str]:
@@ -79,10 +84,18 @@ def make_queries(query: str, attempt: int) -> list[str]:
     return unique
 
 
-async def _searx(query: str, page: int, client: httpx.AsyncClient) -> list[dict]:
+async def _searx(
+    query: str,
+    page: int,
+    client: httpx.AsyncClient,
+    categories: str | None = None,
+) -> list[dict]:
+    params = {"q": query, "format": "json", "language": "all", "pageno": page}
+    if categories:
+        params["categories"] = categories
     response = await client.get(
         f"{settings.searxng_url.rstrip('/')}/search",
-        params={"q": query, "format": "json", "language": "all", "pageno": page},
+        params=params,
     )
     response.raise_for_status()
     return response.json().get("results", [])
@@ -131,6 +144,29 @@ def _visual_match(reference_hashes: list[str], candidate_hash: str) -> tuple[flo
         return 0.0, None
 
 
+def _candidate_from_item(item: dict) -> Candidate | None:
+    url = item.get("url") or ""
+    if not url.startswith(("http://", "https://")):
+        return None
+    parsed = urlparse(url)
+    if not parsed.netloc:
+        return None
+    image_url = (
+        item.get("img_src")
+        or item.get("thumbnail_src")
+        or item.get("thumbnail")
+        or item.get("image")
+    )
+    return Candidate(
+        title=(item.get("title") or parsed.netloc).strip(),
+        url=url,
+        image_url=image_url,
+        snippet=(item.get("content") or item.get("source") or "").strip(),
+        summary="",
+        score=0.0,
+    )
+
+
 async def run_research(
     query: str,
     attempt: int,
@@ -140,31 +176,42 @@ async def run_research(
     reference_hashes = reference_hashes or []
     proxy = settings.egress_proxy_url or None
     timeout = httpx.Timeout(settings.search_http_timeout_seconds)
-    headers = {"User-Agent": "DeepSearch/0.2 (+personal research assistant)"}
+    headers = {"User-Agent": "DeepSearch/0.3 (+personal research assistant)"}
 
     async with httpx.AsyncClient(timeout=timeout, headers=headers, proxy=proxy) as client:
         raw: dict[str, Candidate] = {}
         page = min(5, 1 + attempt // 3)
-        for search_query in make_queries(query, attempt):
+        queries = make_queries(query, attempt)
+
+        for query_index, search_query in enumerate(queries):
+            batches: list[list[dict]] = []
             try:
-                items = await _searx(search_query, page, client)
+                batches.append(await _searx(search_query, page, client))
             except Exception:
-                continue
-            for item in items:
-                url = item.get("url") or ""
-                if not url.startswith(("http://", "https://")):
-                    continue
-                parsed = urlparse(url)
-                if not parsed.netloc or url in raw:
-                    continue
-                raw[url] = Candidate(
-                    title=(item.get("title") or parsed.netloc).strip(),
-                    url=url,
-                    image_url=item.get("img_src") or item.get("thumbnail"),
-                    snippet=(item.get("content") or "").strip(),
-                    summary="",
-                    score=overlap_score(query, f"{item.get('title', '')} {item.get('content', '')}"),
-                )
+                pass
+
+            # Media searches additionally query image engines. Limit image-engine
+            # expansion to the first few query variants to protect the free VM.
+            if reference_hashes and query_index < 4:
+                try:
+                    batches.append(await _searx(search_query, min(page, 2), client, categories="images"))
+                except Exception:
+                    pass
+
+            for items in batches:
+                for item in items:
+                    candidate = _candidate_from_item(item)
+                    if candidate is None:
+                        continue
+                    if candidate.url in raw:
+                        existing = raw[candidate.url]
+                        if not existing.image_url and candidate.image_url:
+                            existing.image_url = candidate.image_url
+                        continue
+                    candidate.score = overlap_score(query, f"{candidate.title} {candidate.snippet}")
+                    raw[candidate.url] = candidate
+                    if len(raw) >= budget.max_candidates:
+                        break
                 if len(raw) >= budget.max_candidates:
                     break
             if len(raw) >= budget.max_candidates:

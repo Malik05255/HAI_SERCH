@@ -7,7 +7,7 @@ from sqlalchemy import select
 from .budget import budget_for_job
 from .config import settings
 from .database import Base, SessionLocal, engine
-from .media import delete_uploaded_media, enrich_query, visual_hashes
+from .media import delete_uploaded_media, media_features
 from .models import Result
 from .queue import claim_next_job, requeue
 from .research import run_research
@@ -33,6 +33,20 @@ def finish_job(db, job, status: str, progress: float | None = None, purge_media:
     db.commit()
 
 
+def _effective_query(job, features: dict) -> str:
+    parts = [
+        part.strip()
+        for part in (
+            job.query,
+            features.get("ocr", ""),
+            features.get("transcript", ""),
+            features.get("vision", ""),
+        )
+        if part and part.strip()
+    ]
+    return " ".join(parts)[:12000]
+
+
 def process_one() -> bool:
     with SessionLocal() as db:
         job = claim_next_job(db)
@@ -43,8 +57,21 @@ def process_one() -> bool:
             return True
 
         budget = budget_for_job(job.attempts - 1)
-        effective_query = enrich_query(job.query, job.input_url, job.input_type, budget.video_keyframes)
-        hashes = visual_hashes(job.input_url, job.input_type, budget.video_keyframes)
+        features = media_features(job.input_url, job.input_type, budget.video_keyframes)
+
+        # A media search must not silently degrade to OCR/text-only research when
+        # visual understanding is enabled. If Vision is still starting or failed
+        # transiently, keep the task queued and retry later.
+        if job.input_type in {"image", "video"} and settings.vision_enabled and not features.get("vision"):
+            if job.attempts >= settings.search_max_attempts:
+                finish_job(db, job, "failed")
+            else:
+                db.commit()
+                requeue(db, job)
+            return True
+
+        effective_query = _effective_query(job, features)
+        hashes = list(features.get("hashes", []))
         if not effective_query:
             finish_job(db, job, "needs_context")
             return True
@@ -72,7 +99,10 @@ def process_one() -> bool:
                 evidence = {
                     "verified_page": bool(candidate.summary),
                     "attempt": job.attempts,
-                    "media_enriched": effective_query != job.query,
+                    "media_enriched": bool(features.get("ocr") or features.get("transcript") or features.get("vision")),
+                    "vision_used": bool(features.get("vision")),
+                    "speech_used": bool(features.get("transcript")),
+                    "ocr_used": bool(features.get("ocr")),
                     "visual_score": candidate.visual_score,
                     "visual_distance": candidate.visual_distance,
                     "visual_match": candidate.visual_distance is not None

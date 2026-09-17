@@ -35,7 +35,7 @@ jobs:
         working-directory: app
       - name: Build APK
         working-directory: app
-        run: flutter build apk --release --dart-define=API_BASE_URL=${{ secrets.API_BASE_URL }} --dart-define=API_TOKEN=${{ secrets.API_TOKEN }}
+        run: flutter build apk --release --dart-define=API_BASE_URL=${{ secrets.API_BASE_URL }}
       - run: cp app/build/app/outputs/flutter-apk/app-release.apk deep-search-android.apk
       - uses: actions/upload-artifact@v4
         with:
@@ -58,7 +58,7 @@ jobs:
         working-directory: app
       - name: Build Windows
         working-directory: app
-        run: flutter build windows --release --dart-define=API_BASE_URL=${{ secrets.API_BASE_URL }} --dart-define=API_TOKEN=${{ secrets.API_TOKEN }}
+        run: flutter build windows --release --dart-define=API_BASE_URL=${{ secrets.API_BASE_URL }}
       - name: Install Inno Setup
         run: choco install innosetup --no-progress -y
       - name: Build installer

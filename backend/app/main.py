@@ -39,6 +39,7 @@ def startup() -> None:
     with engine.begin() as connection:
         connection.exec_driver_sql("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS account_id VARCHAR(36) NULL")
         connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_jobs_account_id ON jobs (account_id)")
+        connection.exec_driver_sql("ALTER TABLE devices ADD COLUMN IF NOT EXISTS push_token TEXT NULL")
 
 
 def _queue_positions(db: Session, account_id: str) -> dict[str, int]:

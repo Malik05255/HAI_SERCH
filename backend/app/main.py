@@ -228,7 +228,7 @@ async def upload(file: UploadFile, principal: Principal = Depends(require_princi
         destination.unlink(missing_ok=True)
         raise
 
-    return {"upload_id": key, "input_type": probe.input_type, "size": written, "temporary": False}
+    return {"upload_id": key, "input_type": probe.input_type, "size": written, "temporary": True}
 
 
 @app.post("/v1/jobs", response_model=JobOut)

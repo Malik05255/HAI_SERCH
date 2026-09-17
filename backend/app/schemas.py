@@ -33,6 +33,7 @@ class JobOut(BaseModel):
     attempts: int
     queue_position: int | None = None
     media_available: bool = False
+    last_error: str | None = None
     created_at: datetime
     updated_at: datetime
 

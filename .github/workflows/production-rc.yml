@@ -1,0 +1,288 @@
+name: Production RC
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "RC version"
+        required: true
+        default: "v1.0.0-rc.1"
+        type: string
+      ref:
+        description: "Branch, tag, or commit to deploy and release"
+        required: true
+        default: "main"
+        type: string
+      bootstrap:
+        description: "Bootstrap Docker on a fresh Ubuntu server"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: production-rc
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    environment: production
+    outputs:
+      release_tag: ${{ steps.meta.outputs.release_tag }}
+      release_version: ${{ steps.meta.outputs.release_version }}
+      target_sha: ${{ steps.meta.outputs.target_sha }}
+    env:
+      API_BASE_URL: ${{ secrets.API_BASE_URL }}
+      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+      DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+      DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+      DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+      DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+      PRODUCTION_ENV_B64: ${{ secrets.PRODUCTION_ENV_B64 }}
+      ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+      ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      FIREBASE_API_KEY: ${{ secrets.FIREBASE_API_KEY }}
+      FIREBASE_APP_ID: ${{ secrets.FIREBASE_APP_ID }}
+      FIREBASE_MESSAGING_SENDER_ID: ${{ secrets.FIREBASE_MESSAGING_SENDER_ID }}
+      FIREBASE_PROJECT_ID: ${{ secrets.FIREBASE_PROJECT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+
+      - id: meta
+        name: Validate production inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TAG="${{ inputs.version }}"
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$ ]] || {
+            echo "Version must look like v1.0.0-rc.1"
+            exit 1
+          }
+
+          for key in \
+            API_BASE_URL DEPLOY_HOST DEPLOY_USER DEPLOY_SSH_KEY DEPLOY_KNOWN_HOSTS DEPLOY_PATH PRODUCTION_ENV_B64 \
+            ANDROID_KEYSTORE_BASE64 ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD ANDROID_KEYSTORE_PASSWORD \
+            FIREBASE_API_KEY FIREBASE_APP_ID FIREBASE_MESSAGING_SENDER_ID FIREBASE_PROJECT_ID
+          do
+            test -n "${!key}" || { echo "$key is required"; exit 1; }
+          done
+
+          [[ "$API_BASE_URL" == https://* ]] || { echo "API_BASE_URL must use HTTPS"; exit 1; }
+          [[ "$API_BASE_URL" != */ ]] || { echo "API_BASE_URL must not end with slash"; exit 1; }
+          [[ "$DEPLOY_HOST" =~ ^[A-Za-z0-9.-]+$ ]] || { echo "Invalid DEPLOY_HOST"; exit 1; }
+          [[ "$DEPLOY_USER" =~ ^[A-Za-z_][A-Za-z0-9_-]*$ ]] || { echo "Invalid DEPLOY_USER"; exit 1; }
+          [[ "$DEPLOY_PATH" =~ ^/opt/[A-Za-z0-9._/-]+$ ]] || { echo "DEPLOY_PATH must be under /opt"; exit 1; }
+
+          TARGET_SHA="$(git rev-parse HEAD)"
+          echo "release_tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "release_version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          echo "target_sha=$TARGET_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Decode and validate production environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s' "$PRODUCTION_ENV_B64" | base64 --decode > /tmp/production.env
+          python scripts/validate_production_env.py /tmp/production.env
+
+  deploy:
+    needs: preflight
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+      DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+      DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+      DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+      DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+      PRODUCTION_ENV_B64: ${{ secrets.PRODUCTION_ENV_B64 }}
+      TARGET_SHA: ${{ needs.preflight.outputs.target_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.preflight.outputs.target_sha }}
+
+      - name: Configure SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          install -m 0700 -d ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Bootstrap fresh server
+        if: ${{ inputs.bootstrap }}
+        shell: bash
+        run: |
+          cat scripts/bootstrap_server.sh | ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes "$DEPLOY_USER@$DEPLOY_HOST" "sudo bash -s -- '$DEPLOY_USER'"
+
+      - name: Checkout exact production commit
+        id: checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          SSH=(ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes "$DEPLOY_USER@$DEPLOY_HOST")
+          "${SSH[@]}" "mkdir -p '$DEPLOY_PATH'"
+          if ! "${SSH[@]}" "test -d '$DEPLOY_PATH/.git'"; then
+            "${SSH[@]}" "git clone https://github.com/$GITHUB_REPOSITORY.git '$DEPLOY_PATH'"
+          fi
+
+          PREVIOUS_SHA="$("${SSH[@]}" "cd '$DEPLOY_PATH' && git rev-parse HEAD 2>/dev/null || true")"
+          "${SSH[@]}" "cd '$DEPLOY_PATH' && git fetch --prune origin && git reset --hard '$TARGET_SHA'"
+          echo "previous_sha=$PREVIOUS_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Install production environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s' "$PRODUCTION_ENV_B64" | base64 --decode | \
+            ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes "$DEPLOY_USER@$DEPLOY_HOST" \
+            "umask 077; cat > '$DEPLOY_PATH/.env'"
+
+      - name: Deploy and verify HTTPS
+        shell: bash
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes "$DEPLOY_USER@$DEPLOY_HOST" \
+            "cd '$DEPLOY_PATH' && bash scripts/deploy_server.sh '${{ steps.checkout.outputs.previous_sha }}'"
+
+      - name: Verify deployed commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          REMOTE_SHA="$(ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes "$DEPLOY_USER@$DEPLOY_HOST" "cd '$DEPLOY_PATH' && git rev-parse HEAD")"
+          test "$REMOTE_SHA" = "$TARGET_SHA" || {
+            echo "Server commit mismatch: $REMOTE_SHA != $TARGET_SHA"
+            exit 1
+          }
+
+  android:
+    needs: [preflight, deploy]
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_VERSION: ${{ needs.preflight.outputs.release_version }}
+      ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+      ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      ANDROID_KEYSTORE_PATH: release.jks
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.preflight.outputs.target_sha }}
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.47.4"
+          channel: stable
+          cache: true
+      - run: flutter create --platforms=android --org com.hai --project-name deep_search .
+        working-directory: app
+      - name: Restore Android signing key
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: echo "$KEYSTORE_B64" | base64 --decode > app/android/app/release.jks
+      - run: python -m pip install pillow
+      - run: python scripts/prepare_platforms.py
+      - run: python scripts/generate_icon.py
+      - run: flutter pub get
+        working-directory: app
+      - run: flutter test
+        working-directory: app
+      - name: Build signed RC APK
+        working-directory: app
+        run: |
+          flutter build apk --release \
+            --build-name="$RELEASE_VERSION" \
+            --build-number="$GITHUB_RUN_NUMBER" \
+            --dart-define="API_BASE_URL=${{ secrets.API_BASE_URL }}" \
+            --dart-define="FIREBASE_API_KEY=${{ secrets.FIREBASE_API_KEY }}" \
+            --dart-define="FIREBASE_APP_ID=${{ secrets.FIREBASE_APP_ID }}" \
+            --dart-define="FIREBASE_MESSAGING_SENDER_ID=${{ secrets.FIREBASE_MESSAGING_SENDER_ID }}" \
+            --dart-define="FIREBASE_PROJECT_ID=${{ secrets.FIREBASE_PROJECT_ID }}"
+      - name: Prepare Android assets
+        run: |
+          cp app/build/app/outputs/flutter-apk/app-release.apk deep-search-android.apk
+          sha256sum deep-search-android.apk > deep-search-android.apk.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: production-rc-android
+          path: |
+            deep-search-android.apk
+            deep-search-android.apk.sha256
+
+  windows:
+    needs: [preflight, deploy]
+    runs-on: windows-latest
+    env:
+      RELEASE_VERSION: ${{ needs.preflight.outputs.release_version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.preflight.outputs.target_sha }}
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.47.4"
+          channel: stable
+          cache: true
+      - run: flutter create --platforms=windows --project-name deep_search .
+        working-directory: app
+      - run: python -m pip install pillow
+      - run: python scripts/prepare_platforms.py
+      - run: python scripts/generate_icon.py
+      - run: flutter pub get
+        working-directory: app
+      - run: flutter test
+        working-directory: app
+      - name: Build Windows RC
+        working-directory: app
+        shell: pwsh
+        run: flutter build windows --release --build-name=$env:RELEASE_VERSION --build-number=${{ github.run_number }} --dart-define=API_BASE_URL=${{ secrets.API_BASE_URL }}
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+      - name: Build installer
+        shell: pwsh
+        run: |
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "/DMyAppVersion=$env:RELEASE_VERSION" installer\windows.iss
+          Copy-Item installer\dist\deep-search-windows-setup.exe deep-search-windows-setup.exe
+          $hash = (Get-FileHash deep-search-windows-setup.exe -Algorithm SHA256).Hash.ToLower()
+          "$hash  deep-search-windows-setup.exe" | Out-File -FilePath deep-search-windows-setup.exe.sha256 -Encoding ascii
+      - uses: actions/upload-artifact@v4
+        with:
+          name: production-rc-windows
+          path: |
+            deep-search-windows-setup.exe
+            deep-search-windows-setup.exe.sha256
+
+  publish:
+    needs: [preflight, deploy, android, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Final public health check
+        shell: bash
+        run: curl -fsS --retry 8 --retry-delay 5 --max-time 10 "${{ secrets.API_BASE_URL }}/health"
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.preflight.outputs.release_tag }}
+          target_commitish: ${{ needs.preflight.outputs.target_sha }}
+          name: البحث العميق ${{ needs.preflight.outputs.release_tag }}
+          generate_release_notes: true
+          prerelease: true
+          files: |
+            dist/deep-search-android.apk
+            dist/deep-search-android.apk.sha256
+            dist/deep-search-windows-setup.exe
+            dist/deep-search-windows-setup.exe.sha256

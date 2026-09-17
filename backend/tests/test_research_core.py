@@ -15,7 +15,13 @@ from app.research import (
     make_queries,
     overlap_score,
 )
-from app.worker import _diverse_order, _effective_query, _image_capability, _safe_error
+from app.worker import (
+    _diverse_order,
+    _effective_query,
+    _image_capability,
+    _merge_stronger_evidence,
+    _safe_error,
+)
 
 
 def _result(title: str, url: str, score: float) -> Result:
@@ -175,6 +181,48 @@ def test_candidate_normalizes_relative_image_and_source_tracking() -> None:
 def test_canonical_url_rejects_credentials_and_non_http_schemes() -> None:
     assert _canonical_http_url("https://alice:secret@example.com/private") == ""
     assert _canonical_http_url("file:///etc/passwd") == ""
+
+
+def test_stronger_visual_evidence_replaces_older_text_only_evidence() -> None:
+    current = {
+        "verified_page": True,
+        "visual_match": False,
+        "visual_score": 0.0,
+        "image_proxy_token": "existing-token",
+    }
+    incoming = {
+        "verified_page": False,
+        "visual_match": True,
+        "visual_score": 94.0,
+        "visual_distance": 3,
+    }
+
+    merged, changed = _merge_stronger_evidence(current, incoming)
+
+    assert changed is True
+    assert merged["visual_match"] is True
+    assert merged["visual_score"] == 94.0
+    assert merged["image_proxy_token"] == "existing-token"
+
+
+def test_weaker_evidence_does_not_replace_stronger_existing_evidence() -> None:
+    current = {
+        "verified_page": True,
+        "visual_match": True,
+        "visual_score": 97.0,
+        "image_proxy_token": "existing-token",
+    }
+    incoming = {
+        "verified_page": False,
+        "visual_match": False,
+        "visual_score": 10.0,
+        "image_proxy_token": "new-token",
+    }
+
+    merged, changed = _merge_stronger_evidence(current, incoming)
+
+    assert changed is False
+    assert merged == current
 
 
 def test_safe_error_redacts_url_credentials_and_limits_output() -> None:

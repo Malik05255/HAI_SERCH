@@ -70,6 +70,7 @@ class SearchJob {
 
 class SearchResult {
   const SearchResult({
+    this.id = 0,
     required this.rank,
     required this.title,
     required this.url,
@@ -79,6 +80,7 @@ class SearchResult {
     this.imageUrl,
   }) : _summary = summary;
 
+  final int id;
   final int rank;
   final String title;
   final String url;
@@ -88,6 +90,7 @@ class SearchResult {
   final Map<String, dynamic> evidence;
 
   factory SearchResult.fromJson(Map<String, dynamic> json) => SearchResult(
+        id: (json['id'] as num?)?.toInt() ?? 0,
         rank: (json['rank'] as num?)?.toInt() ?? 0,
         title: (json['title'] as String?) ?? '',
         url: (json['url'] as String?) ?? '',
@@ -127,6 +130,7 @@ class SearchResult {
   }
 
   Map<String, dynamic> toJson() => {
+        'id': id,
         'rank': rank,
         'title': title,
         'url': url,

@@ -27,6 +27,7 @@ class Candidate:
     score: float
     visual_score: float = 0.0
     visual_distance: int | None = None
+    page_verified: bool = False
 
 
 def tokens(text: str) -> set[str]:
@@ -39,6 +40,12 @@ def overlap_score(query: str, text: str) -> float:
         return 0.0
     t = tokens(text)
     return len(q & t) / len(q)
+
+
+def _best_overlap(queries: list[str], text: str) -> float:
+    if not text:
+        return 0.0
+    return max((overlap_score(query, text) for query in queries if query.strip()), default=0.0)
 
 
 def _query_chunks(text: str) -> list[str]:
@@ -180,7 +187,7 @@ async def run_research(
 ) -> list[Candidate]:
     reference_hashes = reference_hashes or []
     timeout = httpx.Timeout(settings.search_http_timeout_seconds)
-    headers = {"User-Agent": "DeepSearch/0.5 (+personal research assistant)"}
+    headers = {"User-Agent": "DeepSearch/0.6 (+personal research assistant)"}
 
     # SearXNG is an internal Docker service and must always remain direct from
     # the worker. With the VPN overlay, SearXNG itself proxies its engine traffic.
@@ -210,12 +217,18 @@ async def run_research(
                         candidate = _candidate_from_item(item)
                         if candidate is None:
                             continue
+                        text = f"{candidate.title} {candidate.snippet}"
+                        retrieval_score = max(
+                            overlap_score(query, text),
+                            overlap_score(search_query, text),
+                        )
                         if candidate.url in raw:
                             existing = raw[candidate.url]
+                            existing.score = max(existing.score, retrieval_score)
                             if not existing.image_url and candidate.image_url:
                                 existing.image_url = candidate.image_url
                             continue
-                        candidate.score = overlap_score(query, f"{candidate.title} {candidate.snippet}")
+                        candidate.score = retrieval_score
                         raw[candidate.url] = candidate
                         if len(raw) >= budget.max_candidates:
                             break
@@ -244,8 +257,8 @@ async def run_research(
 
     verified: list[Candidate] = []
     for candidate, page_text in zip(ranked, texts):
-        snippet_score = overlap_score(query, f"{candidate.title} {candidate.snippet}") * 100.0
-        page_score = overlap_score(query, page_text[:12000]) * 100.0 if page_text else 0.0
+        snippet_score = _best_overlap(queries, f"{candidate.title} {candidate.snippet}") * 100.0
+        page_score = _best_overlap(queries, page_text[:12000]) * 100.0 if page_text else 0.0
         text_score = snippet_score * 0.35 + page_score * 0.65
         if candidate.visual_distance is not None:
             if candidate.visual_distance <= settings.visual_hash_max_distance:
@@ -255,7 +268,9 @@ async def run_research(
         else:
             combined = text_score
         candidate.score = round(min(100.0, combined), 2)
+        candidate.page_verified = bool(page_text)
         candidate.summary = " ".join(page_text.split())[:700] if page_text else candidate.snippet[:700]
-        verified.append(candidate)
+        if candidate.score > 0:
+            verified.append(candidate)
 
     return sorted(verified, key=lambda c: c.score, reverse=True)

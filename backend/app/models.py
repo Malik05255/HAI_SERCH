@@ -44,6 +44,8 @@ class Job(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
     account_id: Mapped[str | None] = mapped_column(ForeignKey("accounts.id", ondelete="CASCADE"), nullable=True, index=True)
     query: Mapped[str] = mapped_column(Text, default="")
+    context_text: Mapped[str] = mapped_column(Text, default="")
+    context_revision: Mapped[int] = mapped_column(Integer, default=0)
     input_type: Mapped[str] = mapped_column(String(16), default="text")
     input_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     target_results: Mapped[int] = mapped_column(Integer, default=10)

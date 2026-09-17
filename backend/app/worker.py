@@ -23,7 +23,8 @@ def purge_job_media(job) -> None:
         job.input_url = None
 
 
-def finish_job(db, job, status: str, progress: float | None = None, purge_media: bool = True) -> None:
+def finish_job(db, job, status: str, progress: float | None = None, purge_media: bool = False) -> None:
+    """Finish a job while retaining cloud media unless this is an explicit destructive action."""
     job.status = status
     if progress is not None:
         job.progress = progress
@@ -38,7 +39,7 @@ def process_one() -> bool:
         if job is None:
             return False
         if job.stop_requested:
-            finish_job(db, job, "stopped", purge_media=False)
+            finish_job(db, job, "stopped")
             return True
 
         budget = budget_for_job(job.attempts - 1)
@@ -55,7 +56,7 @@ def process_one() -> bool:
                 db.commit()
                 return True
             if job.stop_requested:
-                finish_job(db, job, "stopped", purge_media=False)
+                finish_job(db, job, "stopped")
                 return True
 
             existing = {r.url: r for r in db.scalars(select(Result).where(Result.job_id == job.id)).all()}
@@ -105,7 +106,7 @@ def process_one() -> bool:
                 purge_job_media(job)
                 db.commit()
             elif job.stop_requested:
-                finish_job(db, job, "stopped", purge_media=False)
+                finish_job(db, job, "stopped")
             elif job.attempts >= settings.search_max_attempts:
                 finish_job(db, job, "failed")
             else:

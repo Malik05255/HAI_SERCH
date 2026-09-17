@@ -10,6 +10,7 @@ class SearchJob {
     required this.attempts,
     required this.mediaAvailable,
     this.queuePosition,
+    this.lastError,
   });
 
   final String id;
@@ -22,6 +23,7 @@ class SearchJob {
   final int attempts;
   final bool mediaAvailable;
   final int? queuePosition;
+  final String? lastError;
 
   factory SearchJob.fromJson(Map<String, dynamic> json) => SearchJob(
         id: json['id'] as String,
@@ -34,6 +36,9 @@ class SearchJob {
         attempts: (json['attempts'] as num?)?.toInt() ?? 0,
         mediaAvailable: json['media_available'] == true,
         queuePosition: (json['queue_position'] as num?)?.toInt(),
+        lastError: (json['last_error'] as String?)?.trim().isEmpty == true
+            ? null
+            : json['last_error'] as String?,
       );
 
   String get title => query.trim().isEmpty
@@ -42,6 +47,18 @@ class SearchJob {
 
   bool get isActive => const {'queued', 'running', 'stopped'}.contains(status);
   bool get canContinue => const {'completed', 'partial', 'failed', 'needs_context'}.contains(status);
+
+  String? get userErrorLabel {
+    if (lastError == null) return null;
+    if (lastError == 'visual_analysis_unavailable') {
+      return 'التحليل البصري غير متاح حاليًا، وسيعاد المحاولة تلقائيًا';
+    }
+    if (lastError == 'insufficient_context') {
+      return 'الأدلة الحالية غير كافية لإكمال البحث';
+    }
+    if (status == 'failed') return 'تعذر إكمال آخر محاولة للبحث';
+    return 'تعذرت آخر محاولة، وسيعاد البحث تلقائيًا';
+  }
 }
 
 class SearchResult {

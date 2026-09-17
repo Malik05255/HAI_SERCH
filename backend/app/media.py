@@ -23,6 +23,7 @@ IMAGE_FORMAT_SUFFIX = {
     "WEBP": ".webp",
     "BMP": ".bmp",
 }
+MEDIA_CACHE_VERSION = 2
 
 VISION_PROMPT = (
     "Describe only what is visibly supported by this image for the purpose of finding its original source online. "
@@ -441,6 +442,8 @@ def _cached_features(cache_path: Path) -> dict | None:
         cached = json.loads(cache_path.read_text(encoding="utf-8"))
         if not isinstance(cached, dict):
             return None
+        if int(cached.get("version") or 0) != MEDIA_CACHE_VERSION:
+            return None
         result = {
             "ocr": str(cached.get("ocr") or ""),
             "transcript": str(cached.get("transcript") or ""),
@@ -502,7 +505,8 @@ def media_features(input_url: str | None, input_type: str, max_frames: int) -> d
 
     if not settings.vision_enabled or result["vision"]:
         try:
-            cache_path.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+            payload = {"version": MEDIA_CACHE_VERSION, **result}
+            cache_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
         except OSError:
             pass
     return result

@@ -28,6 +28,44 @@ String _friendlyError(Object error, String fallback) {
   return fallback;
 }
 
+Future<void> _offerVerifiedUpdate(
+  BuildContext context, {
+  bool announceLatest = false,
+}) async {
+  final service = UpdateService();
+  final update = await service.check();
+  if (!context.mounted) return;
+  if (update == null) {
+    if (announceLatest) _snack(context, 'أنت على آخر إصدار');
+    return;
+  }
+
+  final install = await showDialog<bool>(
+    context: context,
+    builder: (dialogContext) => AlertDialog(
+      title: const Text('تحديث متوفر'),
+      content: Text('الإصدار ${update.version}'),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(dialogContext, false),
+          child: const Text('لاحقًا'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(dialogContext, true),
+          child: const Text('تحديث'),
+        ),
+      ],
+    ),
+  );
+  if (install != true || !context.mounted) return;
+
+  try {
+    await service.install(update);
+  } catch (_) {
+    if (context.mounted) _snack(context, 'تعذر تثبيت التحديث');
+  }
+}
+
 Uri? _safeWebUri(String value) {
   final uri = Uri.tryParse(value.trim());
   if (uri == null || !const {'http', 'https'}.contains(uri.scheme)) return null;
@@ -150,6 +188,19 @@ class _HomeShellState extends State<HomeShell> {
   int index = 0;
   int archiveRevision = 0;
   int accountRevision = 0;
+  bool startupUpdateChecked = false;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _checkStartupUpdate());
+  }
+
+  Future<void> _checkStartupUpdate() async {
+    if (startupUpdateChecked || !mounted) return;
+    startupUpdateChecked = true;
+    await _offerVerifiedUpdate(context);
+  }
 
   void archiveChanged() => setState(() => archiveRevision++);
   void accountChanged() => setState(() => accountRevision++);
@@ -1558,31 +1609,10 @@ class _SettingsPageState extends State<SettingsPage> {
 
   Future<void> checkUpdate() async {
     setState(() => checkingUpdate = true);
-    final update = await UpdateService().check();
-    if (!mounted) return;
-    setState(() => checkingUpdate = false);
-    if (update == null) {
-      _snack(context, 'أنت على آخر إصدار');
-      return;
-    }
-
-    final install = await showDialog<bool>(
-      context: context,
-      builder: (_) => AlertDialog(
-        title: const Text('تحديث متوفر'),
-        content: Text('الإصدار ${update.version}'),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('لاحقًا')),
-          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('تحديث')),
-        ],
-      ),
-    );
-    if (install == true) {
-      try {
-        await UpdateService().install(update);
-      } catch (_) {
-        if (mounted) _snack(context, 'تعذر تثبيت التحديث');
-      }
+    try {
+      await _offerVerifiedUpdate(context, announceLatest: true);
+    } finally {
+      if (mounted) setState(() => checkingUpdate = false);
     }
   }
 

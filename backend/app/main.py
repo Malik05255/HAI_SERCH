@@ -46,6 +46,7 @@ def startup() -> None:
     with engine.begin() as connection:
         connection.exec_driver_sql("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS account_id VARCHAR(36) NULL")
         connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_jobs_account_id ON jobs (account_id)")
+        connection.exec_driver_sql("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS last_error TEXT NULL")
         connection.exec_driver_sql("ALTER TABLE devices ADD COLUMN IF NOT EXISTS push_token TEXT NULL")
 
 
@@ -102,6 +103,7 @@ def _job_out(job: Job, positions: dict[str, int]) -> dict:
         "attempts": job.attempts,
         "queue_position": positions.get(job.id),
         "media_available": bool(job.input_url and Path(job.input_url).is_file()),
+        "last_error": job.last_error,
         "created_at": job.created_at,
         "updated_at": job.updated_at,
     }
@@ -347,6 +349,7 @@ def resume_job(job_id: str, principal: Principal = Depends(require_principal), d
     job = _owned_job(db, job_id, principal)
     if job.status == "stopped":
         job.stop_requested = False
+        job.last_error = None
         job.status = "queued"
         job.next_run_at = datetime.now(timezone.utc)
         db.commit()
@@ -370,6 +373,7 @@ def continue_job(job_id: str, principal: Principal = Depends(require_principal),
         job.attempts = max(previous_attempts, settings.search_continue_attempt_floor)
 
     job.stop_requested = False
+    job.last_error = None
     job.status = "queued"
     job.progress = 0.15
     job.next_run_at = datetime.now(timezone.utc)

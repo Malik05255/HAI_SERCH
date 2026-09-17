@@ -52,12 +52,31 @@ class ApiClient {
     if (id != null) await _storage.write(key: 'deep_search_device_id', value: id);
   }
 
+  Future<void> _recoverAuth() async {
+    _token = null;
+    _initialized = false;
+    await _storage.delete(key: 'deep_search_device_token');
+    await _storage.delete(key: 'deep_search_device_id');
+    await init();
+  }
+
   Future<Map<String, String>> _headers() async {
     await init();
     return {
       'Content-Type': 'application/json',
       'Authorization': 'Bearer $_token',
     };
+  }
+
+  Future<http.Response> _authorized(
+    Future<http.Response> Function(Map<String, String> headers) request,
+  ) async {
+    var response = await request(await _headers());
+    if (response.statusCode == 401) {
+      await _recoverAuth();
+      response = await request(await _headers());
+    }
+    return response;
   }
 
   Future<void> pair(String code) async {
@@ -72,32 +91,40 @@ class ApiClient {
   }
 
   Future<Map<String, dynamic>> createPairCode() async {
-    final response = await http.post(Uri.parse('$baseUrl/v1/auth/pair-code'), headers: await _headers());
+    final response = await _authorized(
+      (headers) => http.post(Uri.parse('$baseUrl/v1/auth/pair-code'), headers: headers),
+    );
     _ensureOk(response);
     return jsonDecode(response.body) as Map<String, dynamic>;
   }
 
   Future<List<Map<String, dynamic>>> devices() async {
-    final response = await http.get(Uri.parse('$baseUrl/v1/auth/devices'), headers: await _headers());
+    final response = await _authorized(
+      (headers) => http.get(Uri.parse('$baseUrl/v1/auth/devices'), headers: headers),
+    );
     _ensureOk(response);
     final items = jsonDecode(response.body) as List<dynamic>;
     return items.map((e) => Map<String, dynamic>.from(e as Map)).toList();
   }
 
   Future<void> revokeDevice(String deviceId) async {
-    final response = await http.delete(Uri.parse('$baseUrl/v1/auth/devices/$deviceId'), headers: await _headers());
+    final response = await _authorized(
+      (headers) => http.delete(Uri.parse('$baseUrl/v1/auth/devices/$deviceId'), headers: headers),
+    );
     _ensureOk(response);
   }
 
   Future<Map<String, dynamic>> storageUsage() async {
-    final response = await http.get(Uri.parse('$baseUrl/v1/storage'), headers: await _headers());
+    final response = await _authorized(
+      (headers) => http.get(Uri.parse('$baseUrl/v1/storage'), headers: headers),
+    );
     _ensureOk(response);
     return jsonDecode(response.body) as Map<String, dynamic>;
   }
 
   Future<List<SearchJob>> listJobs({String view = 'all'}) async {
     final uri = Uri.parse('$baseUrl/v1/jobs').replace(queryParameters: {'view': view});
-    final response = await http.get(uri, headers: await _headers());
+    final response = await _authorized((headers) => http.get(uri, headers: headers));
     _ensureOk(response);
     final items = jsonDecode(response.body) as List<dynamic>;
     return items.map((e) => SearchJob.fromJson(e as Map<String, dynamic>)).toList();
@@ -108,79 +135,113 @@ class ApiClient {
     required String inputType,
     String? uploadId,
   }) async {
-    final response = await http.post(
-      Uri.parse('$baseUrl/v1/jobs'),
-      headers: await _headers(),
-      body: jsonEncode({
-        'query': query,
-        'input_type': inputType,
-        'upload_id': uploadId,
-        'target_results': 10,
-      }),
+    final response = await _authorized(
+      (headers) => http.post(
+        Uri.parse('$baseUrl/v1/jobs'),
+        headers: headers,
+        body: jsonEncode({
+          'query': query,
+          'input_type': inputType,
+          'upload_id': uploadId,
+          'target_results': 10,
+        }),
+      ),
     );
     _ensureOk(response);
     return SearchJob.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
   }
 
-  Future<Map<String, dynamic>> upload(String path) async {
+  Future<http.Response> _uploadOnce(String path) async {
     await init();
     final request = http.MultipartRequest('POST', Uri.parse('$baseUrl/v1/uploads'));
     request.headers['Authorization'] = 'Bearer $_token';
     request.files.add(await http.MultipartFile.fromPath('file', path));
     final streamed = await request.send();
-    final response = await http.Response.fromStream(streamed);
+    return http.Response.fromStream(streamed);
+  }
+
+  Future<Map<String, dynamic>> upload(String path) async {
+    var response = await _uploadOnce(path);
+    if (response.statusCode == 401) {
+      await _recoverAuth();
+      response = await _uploadOnce(path);
+    }
     _ensureOk(response);
     return jsonDecode(response.body) as Map<String, dynamic>;
   }
 
   Future<List<SearchResult>> results(String jobId) async {
-    final response = await http.get(Uri.parse('$baseUrl/v1/jobs/$jobId/results'), headers: await _headers());
+    final response = await _authorized(
+      (headers) => http.get(Uri.parse('$baseUrl/v1/jobs/$jobId/results'), headers: headers),
+    );
     _ensureOk(response);
     final items = jsonDecode(response.body) as List<dynamic>;
     return items.map((e) => SearchResult.fromJson(e as Map<String, dynamic>)).toList();
   }
 
   Future<void> action(String jobId, String action) async {
-    final response = await http.post(Uri.parse('$baseUrl/v1/jobs/$jobId/$action'), headers: await _headers());
+    final response = await _authorized(
+      (headers) => http.post(Uri.parse('$baseUrl/v1/jobs/$jobId/$action'), headers: headers),
+    );
     _ensureOk(response);
   }
 
   Future<File> downloadMedia(String jobId, Directory directory) async {
-    await init();
-    final request = http.Request('GET', Uri.parse('$baseUrl/v1/jobs/$jobId/media'));
-    request.headers['Authorization'] = 'Bearer $_token';
-    final response = await http.Client().send(request);
-    if (response.statusCode < 200 || response.statusCode >= 300) {
-      final body = await response.stream.bytesToString();
-      throw Exception('HTTP ${response.statusCode}: $body');
-    }
+    for (var attempt = 0; attempt < 2; attempt++) {
+      await init();
+      final client = http.Client();
+      try {
+        final request = http.Request('GET', Uri.parse('$baseUrl/v1/jobs/$jobId/media'));
+        request.headers['Authorization'] = 'Bearer $_token';
+        final response = await client.send(request);
 
-    var extension = '';
-    final disposition = response.headers['content-disposition'] ?? '';
-    final filenameMatch = RegExp(r'filename="?([^";]+)').firstMatch(disposition);
-    final filename = filenameMatch?.group(1) ?? '';
-    final dot = filename.lastIndexOf('.');
-    if (dot >= 0 && filename.length - dot <= 12) extension = filename.substring(dot).toLowerCase();
+        if (response.statusCode == 401 && attempt == 0) {
+          await response.stream.drain<void>();
+          await _recoverAuth();
+          continue;
+        }
+        if (response.statusCode < 200 || response.statusCode >= 300) {
+          final body = await response.stream.bytesToString();
+          throw Exception('HTTP ${response.statusCode}: $body');
+        }
 
-    final target = File('${directory.path}${Platform.pathSeparator}source$extension');
-    final sink = target.openWrite();
-    try {
-      await response.stream.pipe(sink);
-    } catch (_) {
-      await sink.close();
-      if (await target.exists()) await target.delete();
-      rethrow;
+        var extension = '';
+        final disposition = response.headers['content-disposition'] ?? '';
+        final filenameMatch = RegExp(r'filename="?([^";]+)').firstMatch(disposition);
+        final filename = filenameMatch?.group(1) ?? '';
+        final dot = filename.lastIndexOf('.');
+        if (dot >= 0 && filename.length - dot <= 12) {
+          extension = filename.substring(dot).toLowerCase();
+        }
+
+        final target = File('${directory.path}${Platform.pathSeparator}source$extension');
+        final sink = target.openWrite();
+        try {
+          await response.stream.pipe(sink);
+        } catch (_) {
+          await sink.close();
+          if (await target.exists()) await target.delete();
+          rethrow;
+        }
+        return target;
+      } finally {
+        client.close();
+      }
     }
-    return target;
+    throw Exception('authentication failed');
   }
 
   Future<void> deleteCloudMedia(String jobId) async {
-    final response = await http.delete(Uri.parse('$baseUrl/v1/jobs/$jobId/media'), headers: await _headers());
+    final response = await _authorized(
+      (headers) => http.delete(Uri.parse('$baseUrl/v1/jobs/$jobId/media'), headers: headers),
+    );
     _ensureOk(response);
   }
 
   Future<void> deleteJob(String jobId) async {
-    final response = await http.delete(Uri.parse('$baseUrl/v1/jobs/$jobId'), headers: await _headers());
+    final response = await _authorized(
+      (headers) => http.delete(Uri.parse('$baseUrl/v1/jobs/$jobId'), headers: headers),
+    );
     _ensureOk(response);
   }
 

@@ -1,8 +1,8 @@
 from collections import Counter
 
-from app.models import Result
+from app.models import Job, Result
 from app.research import _best_overlap, _visual_match, make_queries, overlap_score
-from app.worker import _diverse_order, _image_capability, _safe_error
+from app.worker import _diverse_order, _effective_query, _image_capability, _safe_error
 
 
 def _result(title: str, url: str, score: float) -> Result:
@@ -43,6 +43,24 @@ def test_best_overlap_accepts_translated_planner_evidence() -> None:
 
     assert overlap_score(queries[0], chinese_source) == 0.0
     assert _best_overlap(queries, chinese_source) > 0.5
+
+
+def test_effective_query_includes_live_context_without_changing_title_query() -> None:
+    job = Job(
+        query="فيلم صيني قديم",
+        context_text="البطل يعمل طبيبًا والنهاية في محطة قطار",
+        context_revision=2,
+    )
+    effective = _effective_query(
+        job,
+        {"ocr": "字幕 1998", "transcript": "goodbye", "vision": "railway platform"},
+    )
+
+    assert job.query == "فيلم صيني قديم"
+    assert "البطل يعمل طبيبًا" in effective
+    assert "字幕 1998" in effective
+    assert "goodbye" in effective
+    assert "railway platform" in effective
 
 
 def test_visual_hash_exact_match_scores_maximum() -> None:

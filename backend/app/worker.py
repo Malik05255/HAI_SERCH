@@ -9,7 +9,7 @@ from sqlalchemy import select
 
 from .budget import budget_for_job
 from .config import settings
-from .database import Base, SessionLocal, engine
+from .database import SessionLocal, ensure_schema
 from .media import delete_uploaded_media, media_features
 from .models import Result
 from .planner import plan_queries
@@ -41,10 +41,10 @@ def purge_job_media(job) -> None:
 
 
 def finish_job(db, job, status: str, progress: float | None = None, purge_media: bool = False) -> None:
-    """Finish a job while retaining cloud media unless this is an explicit destructive action."""
     job.status = status
     if progress is not None:
         job.progress = progress
+    job.heartbeat_at = None
     if purge_media:
         purge_job_media(job)
     db.commit()
@@ -77,7 +77,6 @@ def _domain(value: str) -> str:
 
 
 def _diverse_order(results: list[Result], target: int) -> list[Result]:
-    """Put distinct, high-quality sources first without discarding useful evidence."""
     if not results:
         return []
 
@@ -193,17 +192,23 @@ def process_one() -> bool:
                 existing[candidate.url] = result
 
             db.flush()
-            all_results = list(
+            credible_results = list(
                 db.scalars(
                     select(Result)
-                    .where(Result.job_id == job.id)
+                    .where(
+                        Result.job_id == job.id,
+                        Result.match_score >= settings.search_min_result_score,
+                    )
                     .order_by(Result.match_score.desc(), Result.id.asc())
                 ).all()
             )
-            ordered = _diverse_order(all_results, job.target_results)
-            for index, result in enumerate(ordered, start=1):
-                result.rank = index
+            ordered = _diverse_order(credible_results, job.target_results)
             top = ordered[: job.target_results]
+
+            for result in existing.values():
+                result.rank = 0
+            for index, result in enumerate(top, start=1):
+                result.rank = index
 
             job.found_count = len(top)
             job.progress = min(1.0, job.found_count / max(job.target_results, 1))
@@ -235,7 +240,7 @@ def process_one() -> bool:
 
 
 def main() -> None:
-    Base.metadata.create_all(bind=engine)
+    ensure_schema()
     while True:
         worked = process_one()
         if not worked:

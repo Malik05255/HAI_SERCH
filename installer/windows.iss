@@ -18,7 +18,7 @@ SolidCompression=yes
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 CloseApplications=yes
-RestartApplications=no
+RestartApplications=yes
 UninstallDisplayIcon={app}\deep_search.exe
 
 [Files]

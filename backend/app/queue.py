@@ -85,9 +85,13 @@ def claim_next_job(db: Session) -> Job | None:
     return head
 
 
+def _backoff_minutes(attempts: int) -> int:
+    """Spread a 48-attempt search over about two days without busy CPU time."""
+    return min(90, max(2, 2 ** min(max(attempts, 0) // 3, 7)))
+
+
 def requeue(db: Session, job: Job) -> None:
-    delay_minutes = min(60, max(2, 2 ** min(job.attempts // 3, 5)))
     job.status = "queued"
-    job.next_run_at = utcnow() + timedelta(minutes=delay_minutes)
+    job.next_run_at = utcnow() + timedelta(minutes=_backoff_minutes(job.attempts))
     job.heartbeat_at = None
     db.commit()

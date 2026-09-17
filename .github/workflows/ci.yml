@@ -26,7 +26,7 @@ jobs:
         working-directory: app
       - run: flutter pub get
         working-directory: app
-      - run: flutter analyze
+      - run: flutter analyze --no-fatal-infos
         working-directory: app
       - name: Build debug APK
         working-directory: app

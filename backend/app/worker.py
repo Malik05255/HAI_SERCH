@@ -1,6 +1,9 @@
 import asyncio
+import re
 import time
+from collections import defaultdict
 from datetime import datetime, timezone
+from urllib.parse import urlparse
 
 from sqlalchemy import select
 
@@ -12,6 +15,9 @@ from .models import Result
 from .planner import plan_queries
 from .queue import claim_next_job, requeue
 from .research import run_research
+
+
+TITLE_TOKEN_RE = re.compile(r"[^\w\u0600-\u06ff]+", re.UNICODE)
 
 
 def utcnow():
@@ -46,6 +52,52 @@ def _effective_query(job, features: dict) -> str:
         if part and part.strip()
     ]
     return " ".join(parts)[:12000]
+
+
+def _title_key(value: str) -> str:
+    return TITLE_TOKEN_RE.sub(" ", value.casefold()).strip()[:180]
+
+
+def _domain(value: str) -> str:
+    try:
+        host = urlparse(value).netloc.casefold().split(":", 1)[0]
+        return host.removeprefix("www.")
+    except Exception:
+        return ""
+
+
+def _diverse_order(results: list[Result], target: int) -> list[Result]:
+    """Put distinct, high-quality sources first without discarding useful evidence."""
+    if not results:
+        return []
+
+    selected: list[Result] = []
+    deferred: list[Result] = []
+    domains: defaultdict[str, int] = defaultdict(int)
+    seen_titles: set[str] = set()
+
+    for result in results:
+        domain = _domain(result.url)
+        title_key = _title_key(result.title)
+        duplicate_title = bool(title_key and title_key in seen_titles)
+        domain_full = bool(domain and domains[domain] >= 2)
+
+        if len(selected) < target and not duplicate_title and not domain_full:
+            selected.append(result)
+            if domain:
+                domains[domain] += 1
+            if title_key:
+                seen_titles.add(title_key)
+        else:
+            deferred.append(result)
+
+    # If strict diversity produced fewer than requested, fill remaining slots by score.
+    if len(selected) < target:
+        needed = target - len(selected)
+        selected.extend(deferred[:needed])
+        deferred = deferred[needed:]
+
+    return selected + deferred
 
 
 def process_one() -> bool:
@@ -133,10 +185,17 @@ def process_one() -> bool:
                 existing[candidate.url] = result
 
             db.flush()
-            all_results = list(db.scalars(select(Result).where(Result.job_id == job.id).order_by(Result.match_score.desc())).all())
-            top = all_results[: job.target_results]
-            for index, result in enumerate(top, start=1):
+            all_results = list(
+                db.scalars(
+                    select(Result)
+                    .where(Result.job_id == job.id)
+                    .order_by(Result.match_score.desc(), Result.id.asc())
+                ).all()
+            )
+            ordered = _diverse_order(all_results, job.target_results)
+            for index, result in enumerate(ordered, start=1):
                 result.rank = index
+            top = ordered[: job.target_results]
 
             job.found_count = len(top)
             job.progress = min(1.0, job.found_count / max(job.target_results, 1))

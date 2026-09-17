@@ -46,10 +46,19 @@ def _firebase_credentials():
 
 
 def send_job_pushes(db: Session, job: Job) -> bool:
-    """Send a terminal job notification. Failures never affect research state."""
-    firebase = _firebase_credentials()
-    if firebase is None or not job.account_id:
+    """Send a completion notification without affecting research state.
+
+    True means this job no longer needs a retry. A configured notification
+    service with missing/invalid credentials returns False so PostgreSQL keeps
+    the delivery pending across worker restarts. No registered push-capable
+    device is considered handled because there is nothing to notify yet.
+    """
+    if not settings.notifications_enabled or not job.account_id:
         return True
+
+    firebase = _firebase_credentials()
+    if firebase is None:
+        return False
 
     devices = list(
         db.scalars(
@@ -110,4 +119,6 @@ def send_job_pushes(db: Session, job: Job) -> bool:
 
     if changed:
         db.commit()
+    # Once at least one device received the completion notification, do not
+    # retry the same job and risk duplicate notifications on that device.
     return success or changed

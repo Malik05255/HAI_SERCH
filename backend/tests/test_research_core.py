@@ -4,7 +4,15 @@ import io
 from PIL import Image, ImageDraw
 
 from app.models import Job, Result
-from app.research import _best_overlap, _image_hash_variants, _visual_match, make_queries, overlap_score
+from app.research import (
+    Candidate,
+    _best_overlap,
+    _image_hash_variants,
+    _preliminary_candidates,
+    _visual_match,
+    make_queries,
+    overlap_score,
+)
 from app.worker import _diverse_order, _effective_query, _image_capability, _safe_error
 
 
@@ -17,6 +25,17 @@ def _result(title: str, url: str, score: float) -> Result:
         summary="",
         match_score=score,
         evidence={},
+    )
+
+
+def _candidate(name: str, score: float, *, with_image: bool = False) -> Candidate:
+    return Candidate(
+        title=name,
+        url=f"https://example.com/{name}",
+        image_url=f"https://images.example/{name}.jpg" if with_image else None,
+        snippet="",
+        summary="",
+        score=score,
     )
 
 
@@ -93,6 +112,39 @@ def test_result_image_hashes_include_full_and_centered_variants() -> None:
 
     assert 1 <= len(hashes) <= 3
     assert all(len(value) == 16 for value in hashes)
+
+
+def test_media_preliminary_budget_keeps_low_text_image_candidates() -> None:
+    candidates = [
+        _candidate("text-a", 0.99),
+        _candidate("text-b", 0.95),
+        _candidate("text-c", 0.90),
+        _candidate("visual-late", 0.01, with_image=True),
+        _candidate("visual-later", 0.0, with_image=True),
+    ]
+    raw = {candidate.url: candidate for candidate in candidates}
+
+    selected = _preliminary_candidates(raw, verify_pages=2, has_visual_refs=True)
+    urls = {candidate.url for candidate in selected}
+
+    assert len(selected) == 4
+    assert candidates[0].url in urls
+    assert candidates[1].url in urls
+    assert candidates[3].url in urls
+    assert candidates[4].url in urls
+
+
+def test_text_only_preliminary_budget_remains_text_ranked() -> None:
+    candidates = [
+        _candidate("low-image", 0.01, with_image=True),
+        _candidate("high", 0.99),
+        _candidate("medium", 0.60),
+    ]
+    raw = {candidate.url: candidate for candidate in candidates}
+
+    selected = _preliminary_candidates(raw, verify_pages=1, has_visual_refs=False)
+
+    assert [candidate.title for candidate in selected] == ["high", "medium"]
 
 
 def test_safe_error_redacts_url_credentials_and_limits_output() -> None:

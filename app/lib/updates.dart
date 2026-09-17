@@ -46,17 +46,28 @@ class UpdateInfo {
 class UpdateService {
   static const _latestRelease = 'https://api.github.com/repos/Malik05255/HAI_SERCH/releases/latest';
 
+  bool lastCheckFailed = false;
+
   Future<UpdateInfo?> check() async {
+    lastCheckFailed = false;
     try {
       final current = await PackageInfo.fromPlatform();
       final response = await http
           .get(Uri.parse(_latestRelease), headers: {'Accept': 'application/vnd.github+json'})
           .timeout(const Duration(seconds: 12));
-      if (response.statusCode != 200) return null;
+      if (response.statusCode == 404) return null;
+      if (response.statusCode != 200) {
+        lastCheckFailed = true;
+        return null;
+      }
 
       final data = jsonDecode(response.body) as Map<String, dynamic>;
       final tag = ((data['tag_name'] as String?) ?? '').replaceFirst(RegExp(r'^[vV]'), '');
-      if (tag.isEmpty || compareVersions(tag, current.version) <= 0) return null;
+      if (tag.isEmpty) {
+        lastCheckFailed = true;
+        return null;
+      }
+      if (compareVersions(tag, current.version) <= 0) return null;
 
       final wanted = Platform.isAndroid ? 'deep-search-android.apk' : 'deep-search-windows-setup.exe';
       final checksumName = '$wanted.sha256';
@@ -72,9 +83,12 @@ class UpdateService {
         if (name == checksumName) checksumUrl = url;
       }
 
-      // Future updates must have a checksum asset. This intentionally refuses
-      // to install an unverified package even if GitHub reports it as latest.
-      if (downloadUrl == null || checksumUrl == null) return null;
+      // A newer release without its checksum must never be presented as a
+      // successful "latest version" check. It is an incomplete release.
+      if (downloadUrl == null || checksumUrl == null) {
+        lastCheckFailed = true;
+        return null;
+      }
       return UpdateInfo(
         version: tag,
         downloadUrl: downloadUrl,
@@ -82,6 +96,7 @@ class UpdateService {
         fileName: wanted,
       );
     } catch (_) {
+      lastCheckFailed = true;
       return null;
     }
   }

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+import ipaddress
+import socket
 from urllib.parse import urlparse
 
 import httpx
@@ -15,6 +18,52 @@ _NETWORK_ERRORS = (
     httpx.PoolTimeout,
     httpx.RemoteProtocolError,
 )
+_BLOCKED_HOST_SUFFIXES = (".localhost", ".local", ".internal", ".home.arpa")
+
+
+def _public_ip(value: str) -> bool:
+    try:
+        return ipaddress.ip_address(value.split("%", 1)[0]).is_global
+    except ValueError:
+        return False
+
+
+async def public_web_target(url: str) -> bool:
+    """Allow only normal public HTTP(S) destinations used for web research."""
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            return False
+        port = parsed.port
+    except ValueError:
+        return False
+
+    if port not in {None, 80, 443}:
+        return False
+
+    host = parsed.hostname.rstrip(".").casefold()
+    if host == "localhost" or host.endswith(_BLOCKED_HOST_SUFFIXES):
+        return False
+
+    try:
+        literal = ipaddress.ip_address(host.split("%", 1)[0])
+        return literal.is_global
+    except ValueError:
+        pass
+
+    try:
+        infos = await asyncio.to_thread(
+            socket.getaddrinfo,
+            host,
+            port or (443 if parsed.scheme == "https" else 80),
+            0,
+            socket.SOCK_STREAM,
+        )
+    except OSError:
+        return False
+
+    addresses = {info[4][0].split("%", 1)[0] for info in infos if info[4]}
+    return bool(addresses) and all(_public_ip(address) for address in addresses)
 
 
 class EgressRouter:
@@ -34,6 +83,7 @@ class EgressRouter:
         self.mode = mode
         self.proxy_url = settings.egress_proxy_url.strip() or None
         self._sticky: dict[str, str] = {}
+        self._safe_targets: dict[tuple[str, int | None], bool] = {}
         self._direct = httpx.AsyncClient(timeout=timeout, headers=headers, follow_redirects=True)
         self._vpn = (
             httpx.AsyncClient(timeout=timeout, headers=headers, follow_redirects=True, proxy=self.proxy_url)
@@ -71,7 +121,20 @@ class EgressRouter:
             return self._vpn
         return self._direct
 
+    async def _target_allowed(self, url: str) -> bool:
+        try:
+            parsed = urlparse(url)
+            key = ((parsed.hostname or "").casefold(), parsed.port)
+        except ValueError:
+            return False
+        if key not in self._safe_targets:
+            self._safe_targets[key] = await public_web_target(url)
+        return self._safe_targets[key]
+
     async def get(self, url: str, **kwargs) -> httpx.Response:
+        if not await self._target_allowed(url):
+            raise httpx.InvalidURL("public web egress target required")
+
         host = (urlparse(url).hostname or "").casefold()
         routes = self._routes(url)
         last_error: Exception | None = None

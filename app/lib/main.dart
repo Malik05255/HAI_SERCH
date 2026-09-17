@@ -714,6 +714,27 @@ class JobCard extends StatelessWidget {
               const SizedBox(height: 9),
               LinearProgressIndicator(value: job.progress.clamp(0, 1)),
             ],
+            if (job.userErrorLabel case final error?) ...[
+              const SizedBox(height: 10),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 9),
+                decoration: BoxDecoration(
+                  color: Theme.of(context).colorScheme.errorContainer,
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Icon(Icons.info_outline_rounded, size: 18, color: Theme.of(context).colorScheme.onErrorContainer),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      error,
+                      style: TextStyle(color: Theme.of(context).colorScheme.onErrorContainer, fontSize: 12.5),
+                    ),
+                  ),
+                ]),
+              ),
+            ],
             if (!queueMode && job.canContinue) ...[
               const SizedBox(height: 10),
               Row(children: [

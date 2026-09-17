@@ -12,6 +12,25 @@ concurrency:
 jobs:
   backend:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: deepsearch
+          POSTGRES_USER: deepsearch
+          POSTGRES_PASSWORD: deepsearch_ci_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U deepsearch -d deepsearch"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgresql+psycopg://deepsearch:deepsearch_ci_password@127.0.0.1:5432/deepsearch
+      DATA_DIR: /tmp/deepsearch-ci
+      APP_ENV: test
+      NOTIFICATIONS_ENABLED: "false"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -24,6 +43,12 @@ jobs:
       - run: python -m compileall backend/app scripts
       - name: Run backend tests
         run: PYTHONPATH=backend pytest -q backend/tests
+      - name: Run deterministic search quality gate
+        run: PYTHONPATH=backend pytest -q backend/quality_tests
+      - name: Run multi-device E2E and chaos tests
+        run: |
+          rm -rf "$DATA_DIR"
+          PYTHONPATH=backend pytest -q backend/integration_tests
       - name: Validate Docker Compose stacks
         run: |
           cp .env.example .env
@@ -64,6 +89,17 @@ jobs:
       - name: Build debug APK
         working-directory: app
         run: flutter build apk --debug --dart-define=API_BASE_URL=http://127.0.0.1:8000
+      - name: Package Android RC artifact
+        run: |
+          cp app/build/app/outputs/flutter-apk/app-debug.apk deep-search-android-rc.apk
+          sha256sum deep-search-android-rc.apk > deep-search-android-rc.apk.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-rc
+          retention-days: 7
+          path: |
+            deep-search-android-rc.apk
+            deep-search-android-rc.apk.sha256
 
   windows:
     runs-on: windows-latest
@@ -88,3 +124,16 @@ jobs:
       - name: Build Windows debug
         working-directory: app
         run: flutter build windows --debug --dart-define=API_BASE_URL=http://127.0.0.1:8000
+      - name: Package Windows RC artifact
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "app\build\windows\x64\runner\Debug\*" -DestinationPath deep-search-windows-rc.zip -Force
+          $hash = (Get-FileHash deep-search-windows-rc.zip -Algorithm SHA256).Hash.ToLower()
+          "$hash  deep-search-windows-rc.zip" | Out-File -FilePath deep-search-windows-rc.zip.sha256 -Encoding ascii
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-rc
+          retention-days: 7
+          path: |
+            deep-search-windows-rc.zip
+            deep-search-windows-rc.zip.sha256

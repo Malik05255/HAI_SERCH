@@ -2,7 +2,7 @@ import asyncio
 import io
 import re
 from dataclasses import dataclass
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
 import httpx
 import imagehash
@@ -16,6 +16,7 @@ from .egress import EgressRouter
 
 TOKEN_RE = re.compile(r"[\w\u0600-\u06ff]+", re.UNICODE)
 RESULT_IMAGE_MAX_BYTES = 6 * 1024 * 1024
+TRACKING_QUERY_KEYS = {"fbclid", "gclid", "dclid", "mc_cid", "mc_eid"}
 
 
 @dataclass
@@ -94,6 +95,34 @@ def make_queries(query: str, attempt: int, planned_queries: list[str] | None = N
             seen.add(key)
             unique.append(item)
     return unique
+
+
+def _canonical_http_url(value: str) -> str:
+    try:
+        parsed = urlsplit(value.strip())
+        if parsed.scheme.casefold() not in {"http", "https"} or not parsed.hostname:
+            return ""
+        if parsed.username or parsed.password:
+            return ""
+        query = []
+        for key, item in parse_qsl(parsed.query, keep_blank_values=True):
+            lowered = key.casefold()
+            if lowered.startswith("utm_") or lowered in TRACKING_QUERY_KEYS:
+                continue
+            query.append((key, item))
+        port = f":{parsed.port}" if parsed.port else ""
+        netloc = f"{parsed.hostname.casefold()}{port}"
+        return urlunsplit(
+            (
+                parsed.scheme.casefold(),
+                netloc,
+                parsed.path or "/",
+                urlencode(query, doseq=True),
+                "",
+            )
+        )
+    except (TypeError, ValueError):
+        return ""
 
 
 async def _searx(
@@ -188,22 +217,22 @@ def _visual_match(
 
 
 def _candidate_from_item(item: dict) -> Candidate | None:
-    url = item.get("url") or ""
-    if not url.startswith(("http://", "https://")):
+    url = _canonical_http_url(str(item.get("url") or ""))
+    if not url:
         return None
-    parsed = urlparse(url)
-    if not parsed.netloc:
-        return None
-    image_url = (
+    parsed = urlsplit(url)
+    raw_image = (
         item.get("img_src")
         or item.get("thumbnail_src")
         or item.get("thumbnail")
         or item.get("image")
+        or ""
     )
+    image_url = _canonical_http_url(urljoin(url, str(raw_image))) if raw_image else None
     return Candidate(
         title=(item.get("title") or parsed.netloc).strip(),
         url=url,
-        image_url=image_url,
+        image_url=image_url or None,
         snippet=(item.get("content") or item.get("source") or "").strip(),
         summary="",
         score=0.0,
@@ -216,13 +245,7 @@ def _preliminary_candidates(
     *,
     has_visual_refs: bool,
 ) -> list[Candidate]:
-    """Keep text relevance while reserving equal budget for visual candidates.
-
-    For media searches an exact visual source can have a weak title/snippet. If
-    we truncate only by text before hashing images, that source never reaches
-    visual verification. The total preliminary budget stays at 2x verify_pages;
-    we simply reserve up to half for image-bearing candidates in discovery order.
-    """
+    """Keep text relevance while reserving equal budget for visual candidates."""
     limit = max(verify_pages * 2, verify_pages)
     text_ranked = sorted(raw.values(), key=lambda candidate: candidate.score, reverse=True)
     if not has_visual_refs:

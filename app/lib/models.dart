@@ -8,6 +8,7 @@ class SearchJob {
     required this.foundCount,
     required this.targetResults,
     required this.attempts,
+    required this.mediaAvailable,
     this.queuePosition,
   });
 
@@ -19,6 +20,7 @@ class SearchJob {
   final int foundCount;
   final int targetResults;
   final int attempts;
+  final bool mediaAvailable;
   final int? queuePosition;
 
   factory SearchJob.fromJson(Map<String, dynamic> json) => SearchJob(
@@ -30,6 +32,7 @@ class SearchJob {
         foundCount: (json['found_count'] as num?)?.toInt() ?? 0,
         targetResults: (json['target_results'] as num?)?.toInt() ?? 10,
         attempts: (json['attempts'] as num?)?.toInt() ?? 0,
+        mediaAvailable: json['media_available'] == true,
         queuePosition: (json['queue_position'] as num?)?.toInt(),
       );
 
@@ -38,6 +41,7 @@ class SearchJob {
       : query.trim();
 
   bool get isActive => const {'queued', 'running', 'stopped'}.contains(status);
+  bool get canContinue => const {'completed', 'partial', 'failed', 'needs_context'}.contains(status);
 }
 
 class SearchResult {

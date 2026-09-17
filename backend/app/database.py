@@ -22,6 +22,8 @@ def ensure_schema() -> None:
         connection.exec_driver_sql("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS account_id VARCHAR(36) NULL")
         connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_jobs_account_id ON jobs (account_id)")
         connection.exec_driver_sql("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS last_error TEXT NULL")
+        connection.exec_driver_sql("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS context_text TEXT NOT NULL DEFAULT ''")
+        connection.exec_driver_sql("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS context_revision INTEGER NOT NULL DEFAULT 0")
         connection.exec_driver_sql("ALTER TABLE devices ADD COLUMN IF NOT EXISTS push_token TEXT NULL")
 
 

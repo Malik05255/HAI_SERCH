@@ -1,11 +1,16 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:deep_search/models.dart';
 
-SearchJob job({required String inputType, required bool mediaAvailable}) => SearchJob(
+SearchJob job({
+  required String inputType,
+  required bool mediaAvailable,
+  String status = 'completed',
+}) =>
+    SearchJob(
       id: 'job-1',
       query: 'test',
       inputType: inputType,
-      status: 'completed',
+      status: status,
       progress: 1,
       foundCount: 3,
       targetResults: 10,
@@ -25,5 +30,14 @@ void main() {
 
   test('media jobs can continue while their temporary upload still exists', () {
     expect(job(inputType: 'image', mediaAvailable: true).canContinue, isTrue);
+  });
+
+  test('completed purged media jobs hide clue actions', () {
+    expect(job(inputType: 'video', mediaAvailable: false).canAddClue, isFalse);
+  });
+
+  test('active media and completed text jobs still accept clues', () {
+    expect(job(inputType: 'video', mediaAvailable: true, status: 'running').canAddClue, isTrue);
+    expect(job(inputType: 'text', mediaAvailable: false).canAddClue, isTrue);
   });
 }

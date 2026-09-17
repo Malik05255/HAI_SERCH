@@ -158,6 +158,62 @@ class EgressRouter:
 
         raise RuntimeError("redirect handling exhausted")
 
+    async def _validated_read_limited(
+        self,
+        client: httpx.AsyncClient,
+        url: str,
+        max_bytes: int,
+    ) -> tuple[httpx.Response, bytes]:
+        current = url
+
+        for redirect_count in range(_MAX_REDIRECTS + 1):
+            if not await self._target_allowed(current):
+                raise httpx.InvalidURL("public web egress target required")
+
+            request = client.build_request("GET", current)
+            response = await client.send(request, stream=True, follow_redirects=False)
+
+            if response.status_code in _REDIRECT_STATUSES:
+                location = response.headers.get("location")
+                await response.aclose()
+                if not location:
+                    return response, b""
+                if redirect_count >= _MAX_REDIRECTS:
+                    raise httpx.TooManyRedirects(
+                        "too many public web redirects",
+                        request=response.request,
+                    )
+                current = urljoin(str(response.url), location)
+                continue
+
+            if response.status_code >= 400:
+                await response.aclose()
+                return response, b""
+
+            content_length = response.headers.get("content-length")
+            if content_length:
+                try:
+                    if int(content_length) > max_bytes:
+                        await response.aclose()
+                        raise ValueError("response_too_large")
+                except ValueError as exc:
+                    if str(exc) == "response_too_large":
+                        raise
+
+            chunks: list[bytes] = []
+            total = 0
+            try:
+                async for chunk in response.aiter_bytes():
+                    total += len(chunk)
+                    if total > max_bytes:
+                        raise ValueError("response_too_large")
+                    chunks.append(chunk)
+            finally:
+                await response.aclose()
+            return response, b"".join(chunks)
+
+        raise RuntimeError("redirect handling exhausted")
+
     async def get(self, url: str, **kwargs) -> httpx.Response:
         if not await self._target_allowed(url):
             raise httpx.InvalidURL("public web egress target required")
@@ -187,6 +243,44 @@ class EgressRouter:
                     continue
                 raise
             except httpx.HTTPStatusError:
+                raise
+
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("no egress route available")
+
+    async def get_bytes(self, url: str, *, max_bytes: int) -> tuple[httpx.Response, bytes]:
+        """Fetch bounded public bytes using the same validated egress policy."""
+        if max_bytes <= 0:
+            raise ValueError("max_bytes must be positive")
+        if not await self._target_allowed(url):
+            raise httpx.InvalidURL("public web egress target required")
+
+        host = (urlparse(url).hostname or "").casefold()
+        routes = self._routes(url)
+        last_error: Exception | None = None
+
+        for index, route in enumerate(routes):
+            client = self._client(route)
+            try:
+                response, body = await self._validated_read_limited(client, url, max_bytes)
+                if response.status_code == 451 and index + 1 < len(routes):
+                    last_error = httpx.HTTPStatusError(
+                        "Unavailable For Legal Reasons",
+                        request=response.request,
+                        response=response,
+                    )
+                    continue
+                response.raise_for_status()
+                if host:
+                    self._sticky[host] = route
+                return response, body
+            except _NETWORK_ERRORS as exc:
+                last_error = exc
+                if index + 1 < len(routes):
+                    continue
+                raise
+            except (httpx.HTTPStatusError, ValueError):
                 raise
 
         if last_error is not None:

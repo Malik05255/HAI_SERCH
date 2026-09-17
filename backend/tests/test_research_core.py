@@ -7,6 +7,8 @@ from app.models import Job, Result
 from app.research import (
     Candidate,
     _best_overlap,
+    _cache_get,
+    _cache_put,
     _candidate_from_item,
     _canonical_http_url,
     _has_verifiable_evidence,
@@ -294,3 +296,21 @@ def test_strong_visual_match_can_verify_when_source_page_is_blocked() -> None:
     candidate.visual_distance = 2
 
     assert _has_verifiable_evidence(candidate, "") is True
+
+
+def test_in_memory_cache_expires_without_persisting_to_disk() -> None:
+    cache: dict = {}
+    _cache_put(cache, "key", "value", 4, now=100.0)
+
+    assert _cache_get(cache, "key", 60, now=120.0) == "value"
+    assert _cache_get(cache, "key", 60, now=161.0) is None
+
+
+def test_in_memory_cache_is_bounded_and_lru() -> None:
+    cache: dict = {}
+    _cache_put(cache, "a", 1, 2, now=1.0)
+    _cache_put(cache, "b", 2, 2, now=2.0)
+    assert _cache_get(cache, "a", 60, now=3.0) == 1
+    _cache_put(cache, "c", 3, 2, now=4.0)
+
+    assert set(cache) == {"a", "c"}

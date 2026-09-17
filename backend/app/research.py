@@ -16,6 +16,7 @@ from .egress import EgressRouter
 
 
 TOKEN_RE = re.compile(r"[\w\u0600-\u06ff]+", re.UNICODE)
+SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?؟。！？])\\s+|\\n+")
 RESULT_IMAGE_MAX_BYTES = 6 * 1024 * 1024
 TRACKING_QUERY_KEYS = {"fbclid", "gclid", "dclid", "mc_cid", "mc_eid"}
 SEARCH_CACHE_TTL_SECONDS = 20 * 60
@@ -82,6 +83,30 @@ def _best_overlap(queries: list[str], text: str) -> float:
     if not text:
         return 0.0
     return max((overlap_score(query, text) for query in queries if query.strip()), default=0.0)
+
+
+def _evidence_summary(page_text: str, queries: list[str], fallback: str = "") -> str:
+    """Pick the most query-relevant source sentences instead of page boilerplate."""
+    raw = page_text.strip()
+    if not raw:
+        return " ".join(fallback.split())[:700]
+
+    scored: list[tuple[float, int, str]] = []
+    for index, sentence in enumerate(SENTENCE_SPLIT_RE.split(raw)):
+        clean = " ".join(sentence.split())
+        if len(clean) < 20:
+            continue
+        score = _best_overlap(queries, clean)
+        if score > 0:
+            scored.append((score, index, clean))
+
+    if not scored:
+        return " ".join(raw.split())[:700]
+
+    best = sorted(scored, key=lambda item: (-item[0], item[1]))[:3]
+    best.sort(key=lambda item: item[1])
+    summary = " ".join(item[2] for item in best)
+    return summary[:700]
 
 
 def _query_chunks(text: str) -> list[str]:
@@ -437,7 +462,7 @@ async def run_research(
             combined = text_score
         candidate.score = round(min(100.0, combined), 2)
         candidate.page_verified = bool(page_text)
-        candidate.summary = " ".join(page_text.split())[:700] if page_text else candidate.snippet[:700]
+        candidate.summary = _evidence_summary(page_text, queries, fallback=candidate.snippet)
         if candidate.score >= settings.search_min_result_score:
             verified.append(candidate)
 

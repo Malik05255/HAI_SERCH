@@ -7,6 +7,28 @@ import 'package:open_filex/open_filex.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:path_provider/path_provider.dart';
 
+final RegExp _sha256Pattern = RegExp(r'^[a-fA-F0-9]{64}$');
+
+String? parseSha256(String value) {
+  final trimmed = value.trim();
+  if (trimmed.isEmpty) return null;
+  final token = trimmed.split(RegExp(r'\s+')).first.toLowerCase();
+  return _sha256Pattern.hasMatch(token) ? token : null;
+}
+
+int compareVersions(String a, String b) {
+  List<int> parts(String value) =>
+      value.split(RegExp(r'[-+]')).first.split('.').map((e) => int.tryParse(e) ?? 0).toList();
+  final aa = parts(a);
+  final bb = parts(b);
+  for (var i = 0; i < 3; i++) {
+    final av = i < aa.length ? aa[i] : 0;
+    final bv = i < bb.length ? bb[i] : 0;
+    if (av != bv) return av.compareTo(bv);
+  }
+  return 0;
+}
+
 class UpdateInfo {
   const UpdateInfo({
     required this.version,
@@ -23,7 +45,6 @@ class UpdateInfo {
 
 class UpdateService {
   static const _latestRelease = 'https://api.github.com/repos/Malik05255/HAI_SERCH/releases/latest';
-  static final _sha256Pattern = RegExp(r'^[a-fA-F0-9]{64}$');
 
   Future<UpdateInfo?> check() async {
     try {
@@ -35,7 +56,7 @@ class UpdateService {
 
       final data = jsonDecode(response.body) as Map<String, dynamic>;
       final tag = ((data['tag_name'] as String?) ?? '').replaceFirst(RegExp(r'^[vV]'), '');
-      if (tag.isEmpty || _compare(tag, current.version) <= 0) return null;
+      if (tag.isEmpty || compareVersions(tag, current.version) <= 0) return null;
 
       final wanted = Platform.isAndroid ? 'deep-search-android.apk' : 'deep-search-windows-setup.exe';
       final checksumName = '$wanted.sha256';
@@ -85,7 +106,7 @@ class UpdateService {
 
       final sink = partial.openWrite();
       try {
-        await response.stream.pipe(sink);
+        await response.stream.timeout(const Duration(seconds: 30)).pipe(sink);
       } catch (_) {
         await sink.close();
         if (await partial.exists()) await partial.delete();
@@ -118,21 +139,8 @@ class UpdateService {
   Future<String> _fetchExpectedChecksum(String checksumUrl) async {
     final response = await http.get(Uri.parse(checksumUrl)).timeout(const Duration(seconds: 12));
     if (response.statusCode != 200) throw Exception('checksum unavailable');
-    final token = response.body.trim().split(RegExp(r'\s+')).first.toLowerCase();
-    if (!_sha256Pattern.hasMatch(token)) throw Exception('invalid checksum');
-    return token;
-  }
-
-  int _compare(String a, String b) {
-    List<int> parts(String value) =>
-        value.split(RegExp(r'[-+]')).first.split('.').map((e) => int.tryParse(e) ?? 0).toList();
-    final aa = parts(a);
-    final bb = parts(b);
-    for (var i = 0; i < 3; i++) {
-      final av = i < aa.length ? aa[i] : 0;
-      final bv = i < bb.length ? bb[i] : 0;
-      if (av != bv) return av.compareTo(bv);
-    }
-    return 0;
+    final parsed = parseSha256(response.body);
+    if (parsed == null) throw Exception('invalid checksum');
+    return parsed;
   }
 }

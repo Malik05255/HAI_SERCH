@@ -51,10 +51,17 @@ class SearchJob {
   String? get userErrorLabel {
     if (lastError == null) return null;
     if (lastError == 'visual_analysis_unavailable') {
-      return 'التحليل البصري غير متاح حاليًا، وسيعاد المحاولة تلقائيًا';
+      return status == 'failed'
+          ? 'تعذر التحليل البصري بعد عدة محاولات'
+          : 'التحليل البصري غير متاح حاليًا، وسيعاد المحاولة تلقائيًا';
     }
     if (lastError == 'insufficient_context') {
       return 'الأدلة الحالية غير كافية لإكمال البحث';
+    }
+    if (lastError!.contains('search_backend_unavailable')) {
+      return status == 'failed'
+          ? 'تعذر الوصول إلى محرك البحث بعد عدة محاولات'
+          : 'محرك البحث غير متاح مؤقتًا، وسيعاد المحاولة تلقائيًا';
     }
     if (status == 'failed') return 'تعذر إكمال آخر محاولة للبحث';
     return 'تعذرت آخر محاولة، وسيعاد البحث تلقائيًا';

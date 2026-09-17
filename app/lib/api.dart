@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -16,13 +17,31 @@ class ApiClient {
   );
 
   static const FlutterSecureStorage _storage = FlutterSecureStorage();
+  final StreamController<void> _jobChanges = StreamController<void>.broadcast();
   String? _token;
   bool _initialized = false;
+  bool _connectingRealtime = false;
+  bool _realtimeUnauthorized = false;
+  WebSocket? _socket;
+  Timer? _reconnectTimer;
+  Timer? _pingTimer;
+
+  Stream<void> get jobChanges => _jobChanges.stream;
 
   String get deviceName {
     if (Platform.isWindows) return 'Windows';
     if (Platform.isAndroid) return 'Android';
     return 'Device';
+  }
+
+  Uri get _webSocketUri {
+    final base = Uri.parse(baseUrl);
+    return base.replace(
+      scheme: base.scheme == 'https' ? 'wss' : 'ws',
+      path: '/v1/ws',
+      query: null,
+      fragment: null,
+    );
   }
 
   Future<void> init() async {
@@ -33,6 +52,7 @@ class ApiClient {
     }
     _initialized = true;
     await NotificationService.initialize();
+    unawaited(_ensureRealtime());
   }
 
   Future<void> _register() async {
@@ -48,7 +68,11 @@ class ApiClient {
   Future<void> _saveAuth(Map<String, dynamic> payload) async {
     final token = payload['token'] as String?;
     if (token == null || token.isEmpty) throw Exception('missing device token');
+    if (_token != null && _token != token) {
+      await _stopRealtime();
+    }
     _token = token;
+    _realtimeUnauthorized = false;
     await _storage.write(key: 'deep_search_device_token', value: token);
     final id = payload['device_id'] as String?;
     if (id != null) await _storage.write(key: 'deep_search_device_id', value: id);
@@ -56,11 +80,106 @@ class ApiClient {
   }
 
   Future<void> _recoverAuth() async {
+    await _stopRealtime();
     _token = null;
     _initialized = false;
     await _storage.delete(key: 'deep_search_device_token');
     await _storage.delete(key: 'deep_search_device_id');
     await init();
+  }
+
+  Future<void> _stopRealtime() async {
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
+    _pingTimer?.cancel();
+    _pingTimer = null;
+    final socket = _socket;
+    _socket = null;
+    if (socket != null) {
+      try {
+        await socket.close();
+      } catch (_) {}
+    }
+  }
+
+  void _scheduleRealtimeReconnect() {
+    if (!_initialized || _realtimeUnauthorized || _reconnectTimer?.isActive == true) return;
+    _reconnectTimer = Timer(const Duration(seconds: 3), () {
+      _reconnectTimer = null;
+      unawaited(_ensureRealtime());
+    });
+  }
+
+  void _handleRealtimeMessage(dynamic message) {
+    if (message is! String) return;
+    try {
+      final data = jsonDecode(message);
+      if (data is Map && data['type'] == 'jobs.changed') {
+        _jobChanges.add(null);
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _ensureRealtime() async {
+    if (!_initialized ||
+        _realtimeUnauthorized ||
+        _connectingRealtime ||
+        _socket != null ||
+        _token == null ||
+        _token!.isEmpty) {
+      return;
+    }
+
+    _connectingRealtime = true;
+    final tokenAtConnect = _token!;
+    try {
+      final socket = await WebSocket.connect(
+        _webSocketUri.toString(),
+        headers: {HttpHeaders.authorizationHeader: 'Bearer $tokenAtConnect'},
+      ).timeout(const Duration(seconds: 8));
+
+      if (!_initialized || _token != tokenAtConnect) {
+        await socket.close();
+        return;
+      }
+
+      _socket = socket;
+      _pingTimer?.cancel();
+      _pingTimer = Timer.periodic(const Duration(seconds: 25), (_) {
+        try {
+          _socket?.add('ping');
+        } catch (_) {}
+      });
+
+      socket.listen(
+        _handleRealtimeMessage,
+        onDone: () {
+          if (identical(_socket, socket)) {
+            _socket = null;
+            _pingTimer?.cancel();
+            _pingTimer = null;
+          }
+          if (socket.closeCode == 4401) {
+            _realtimeUnauthorized = true;
+            return;
+          }
+          _scheduleRealtimeReconnect();
+        },
+        onError: (_) {
+          if (identical(_socket, socket)) {
+            _socket = null;
+            _pingTimer?.cancel();
+            _pingTimer = null;
+          }
+          _scheduleRealtimeReconnect();
+        },
+        cancelOnError: true,
+      );
+    } catch (_) {
+      _scheduleRealtimeReconnect();
+    } finally {
+      _connectingRealtime = false;
+    }
   }
 
   Future<Map<String, String>> _headers() async {
@@ -91,6 +210,7 @@ class ApiClient {
     _ensureOk(response);
     await _saveAuth(jsonDecode(response.body) as Map<String, dynamic>);
     _initialized = true;
+    unawaited(_ensureRealtime());
   }
 
   Future<Map<String, dynamic>> createPairCode() async {
@@ -189,9 +309,6 @@ class ApiClient {
       final capability = (evidence.remove('image_proxy_token') as String?)?.trim() ?? '';
       payload['evidence'] = evidence;
 
-      // Never hand an external thumbnail URL to Flutter. A result image is
-      // rendered only through our server capability endpoint, so Android and
-      // Windows do not contact the source website directly.
       if (id > 0 && originalImage.isNotEmpty && capability.isNotEmpty) {
         payload['image_url'] = '$baseUrl/v1/result-images/$id?token=${Uri.encodeQueryComponent(capability)}';
       } else {

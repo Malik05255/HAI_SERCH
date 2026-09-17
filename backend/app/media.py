@@ -3,6 +3,7 @@ import json
 import re
 import subprocess
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
@@ -16,6 +17,12 @@ IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
 VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v"}
 UPLOAD_ID_RE = re.compile(r"^[0-9a-f-]{36}(?:\.[a-z0-9]{1,8})?$")
 ACCOUNT_ID_RE = re.compile(r"^[0-9a-f-]{36}$")
+IMAGE_FORMAT_SUFFIX = {
+    "JPEG": ".jpg",
+    "PNG": ".png",
+    "WEBP": ".webp",
+    "BMP": ".bmp",
+}
 
 VISION_PROMPT = (
     "Describe only what is visibly supported by this image for the purpose of finding its original source online. "
@@ -23,6 +30,15 @@ VISION_PROMPT = (
     "cinematic style, animation/live-action, distinctive landmarks, and anything useful for identifying a movie, "
     "series, video, product, place, or webpage. Do not invent names or facts. Be concise and search-oriented."
 )
+
+
+@dataclass(frozen=True)
+class MediaProbe:
+    input_type: str
+    canonical_suffix: str
+    width: int = 0
+    height: int = 0
+    duration: float = 0.0
 
 
 def _uploads_root() -> Path:
@@ -90,6 +106,71 @@ def delete_uploaded_media(value: str | None) -> bool:
         return True
     except OSError:
         return False
+
+
+def _video_probe(path: Path) -> MediaProbe | None:
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=codec_type",
+                "-show_entries",
+                "format=format_name,duration",
+                "-of",
+                "json",
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        if result.returncode != 0:
+            return None
+        payload = json.loads(result.stdout or "{}")
+        streams = payload.get("streams") or []
+        if not streams or streams[0].get("codec_type") != "video":
+            return None
+        fmt = str((payload.get("format") or {}).get("format_name") or "").casefold()
+        try:
+            duration = max(0.0, float((payload.get("format") or {}).get("duration") or 0.0))
+        except (TypeError, ValueError):
+            duration = 0.0
+        names = {part.strip() for part in fmt.split(",") if part.strip()}
+        if "webm" in names:
+            suffix = ".webm"
+        elif "matroska" in names:
+            suffix = ".mkv"
+        elif "avi" in names:
+            suffix = ".avi"
+        elif names.intersection({"mov", "mp4", "m4a", "3gp", "3g2", "mj2"}):
+            suffix = ".mp4"
+        else:
+            return None
+        return MediaProbe("video", suffix, duration=duration)
+    except Exception:
+        return None
+
+
+def probe_uploaded_media(path: Path) -> MediaProbe | None:
+    """Inspect actual bytes instead of trusting the filename or client MIME type."""
+    try:
+        with Image.open(path) as image:
+            fmt = str(image.format or "").upper()
+            suffix = IMAGE_FORMAT_SUFFIX.get(fmt)
+            if suffix is not None:
+                width, height = image.size
+                image.verify()
+                if width > 0 and height > 0:
+                    return MediaProbe("image", suffix, width=width, height=height)
+    except Exception:
+        pass
+    return _video_probe(path)
 
 
 def _ocr(path: Path) -> str:
@@ -215,8 +296,6 @@ def _video_duration(path: Path) -> float:
 def _extract_video_frames(path: Path, directory: Path, max_frames: int) -> list[Path]:
     pattern = str(directory / "frame-%02d.jpg")
     duration = _video_duration(path)
-    # Uniformly sample the complete clip. Short clips therefore get multiple
-    # useful frames instead of only one frame from a fixed 12-second interval.
     if duration > 0 and max_frames > 0:
         interval = max(0.45, duration / max_frames)
     else:
@@ -366,9 +445,6 @@ def media_features(input_url: str | None, input_type: str, max_frames: int) -> d
         except Exception:
             pass
 
-    # A media job that requires Vision is not considered analysed until the
-    # visual model actually returned content. This prevents an early service
-    # startup failure from becoming a permanent empty cache.
     if not settings.vision_enabled or result["vision"]:
         try:
             cache_path.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")

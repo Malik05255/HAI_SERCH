@@ -55,10 +55,17 @@ class SearchJob {
       : query.trim();
 
   bool get isActive => const {'queued', 'running', 'stopped'}.contains(status);
+
   bool get canContinue {
     if (!const {'completed', 'partial', 'failed', 'needs_context'}.contains(status)) {
       return false;
     }
+    return inputType == 'text' || mediaAvailable;
+  }
+
+  bool get canAddClue {
+    if (status == 'cancelled') return false;
+    if (isActive) return true;
     return inputType == 'text' || mediaAvailable;
   }
 

@@ -2,17 +2,19 @@ from pathlib import Path
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, Header, HTTPException, UploadFile
-from sqlalchemy import select
+from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
 from .config import settings
 from .database import Base, engine, get_db
 from .media import IMAGE_EXTS, VIDEO_EXTS, delete_uploaded_media, resolve_upload_id
 from .models import Job, Result
+from .queue import ACTIVE_STATES
 from .schemas import JobCreate, JobOut, ResultOut
 
 
-app = FastAPI(title=settings.app_name, version="0.2.0")
+CREATE_LOCK_KEY = 847251902
+app = FastAPI(title=settings.app_name, version="0.3.0")
 
 
 @app.on_event("startup")
@@ -26,6 +28,33 @@ def require_api_key(x_api_key: str | None = Header(default=None, alias="X-API-Ke
         return
     if not settings.api_token or x_api_key != settings.api_token:
         raise HTTPException(status_code=401, detail="invalid api key")
+
+
+def _queue_positions(db: Session) -> dict[str, int]:
+    jobs = list(
+        db.scalars(
+            select(Job)
+            .where(Job.status.in_(ACTIVE_STATES))
+            .order_by(Job.created_at.asc(), Job.id.asc())
+        ).all()
+    )
+    return {job.id: index for index, job in enumerate(jobs, start=1)}
+
+
+def _job_out(job: Job, positions: dict[str, int]) -> dict:
+    return {
+        "id": job.id,
+        "query": job.query,
+        "input_type": job.input_type,
+        "target_results": job.target_results,
+        "status": job.status,
+        "progress": job.progress,
+        "found_count": job.found_count,
+        "attempts": job.attempts,
+        "queue_position": positions.get(job.id),
+        "created_at": job.created_at,
+        "updated_at": job.updated_at,
+    }
 
 
 @app.get("/health")
@@ -59,12 +88,11 @@ async def upload(file: UploadFile) -> dict:
     else:
         destination.unlink(missing_ok=True)
         raise HTTPException(status_code=415, detail="unsupported media type")
-    # input_url is a compatibility alias containing the opaque id, never a server path.
     return {"upload_id": key, "input_url": key, "input_type": input_type, "size": written, "temporary": True}
 
 
 @app.post("/v1/jobs", response_model=JobOut, dependencies=[Depends(require_api_key)])
-def create_job(payload: JobCreate, db: Session = Depends(get_db)) -> Job:
+def create_job(payload: JobCreate, db: Session = Depends(get_db)) -> dict:
     input_url = None
     if payload.upload_id:
         path = resolve_upload_id(payload.upload_id)
@@ -76,6 +104,15 @@ def create_job(payload: JobCreate, db: Session = Depends(get_db)) -> Job:
             raise HTTPException(status_code=422, detail="upload type mismatch")
         input_url = str(path)
 
+    # Serialize capacity checks so concurrent Android/Windows submissions cannot exceed five.
+    db.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": CREATE_LOCK_KEY})
+    active_count = db.scalar(select(func.count()).select_from(Job).where(Job.status.in_(ACTIVE_STATES))) or 0
+    if active_count >= settings.search_max_active_jobs:
+        if input_url:
+            delete_uploaded_media(input_url)
+        db.rollback()
+        raise HTTPException(status_code=429, detail="search queue is full (5/5)")
+
     job = Job(
         query=payload.query.strip(),
         input_type=payload.input_type,
@@ -85,20 +122,22 @@ def create_job(payload: JobCreate, db: Session = Depends(get_db)) -> Job:
     db.add(job)
     db.commit()
     db.refresh(job)
-    return job
+    return _job_out(job, _queue_positions(db))
 
 
 @app.get("/v1/jobs", response_model=list[JobOut], dependencies=[Depends(require_api_key)])
-def list_jobs(db: Session = Depends(get_db)) -> list[Job]:
-    return list(db.scalars(select(Job).order_by(Job.created_at.desc()).limit(100)).all())
+def list_jobs(db: Session = Depends(get_db)) -> list[dict]:
+    positions = _queue_positions(db)
+    jobs = list(db.scalars(select(Job).order_by(Job.created_at.desc()).limit(100)).all())
+    return [_job_out(job, positions) for job in jobs]
 
 
 @app.get("/v1/jobs/{job_id}", response_model=JobOut, dependencies=[Depends(require_api_key)])
-def get_job(job_id: str, db: Session = Depends(get_db)) -> Job:
+def get_job(job_id: str, db: Session = Depends(get_db)) -> dict:
     job = db.get(Job, job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="job not found")
-    return job
+    return _job_out(job, _queue_positions(db))
 
 
 @app.get("/v1/jobs/{job_id}/results", response_model=list[ResultOut], dependencies=[Depends(require_api_key)])
@@ -107,35 +146,33 @@ def get_results(job_id: str, db: Session = Depends(get_db)) -> list[Result]:
 
 
 @app.post("/v1/jobs/{job_id}/stop", response_model=JobOut, dependencies=[Depends(require_api_key)])
-def stop_job(job_id: str, db: Session = Depends(get_db)) -> Job:
+def stop_job(job_id: str, db: Session = Depends(get_db)) -> dict:
     job = db.get(Job, job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="job not found")
-    if job.status in {"completed", "partial", "failed", "needs_context", "cancelled"}:
-        return job
-    job.stop_requested = True
-    job.status = "stopped"
-    db.commit()
-    db.refresh(job)
-    return job
+    if job.status not in {"completed", "partial", "failed", "needs_context", "cancelled"}:
+        job.stop_requested = True
+        job.status = "stopped"
+        db.commit()
+        db.refresh(job)
+    return _job_out(job, _queue_positions(db))
 
 
 @app.post("/v1/jobs/{job_id}/resume", response_model=JobOut, dependencies=[Depends(require_api_key)])
-def resume_job(job_id: str, db: Session = Depends(get_db)) -> Job:
+def resume_job(job_id: str, db: Session = Depends(get_db)) -> dict:
     job = db.get(Job, job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="job not found")
-    if job.status != "stopped":
-        return job
-    job.stop_requested = False
-    job.status = "queued"
-    db.commit()
-    db.refresh(job)
-    return job
+    if job.status == "stopped":
+        job.stop_requested = False
+        job.status = "queued"
+        db.commit()
+        db.refresh(job)
+    return _job_out(job, _queue_positions(db))
 
 
 @app.post("/v1/jobs/{job_id}/cancel", response_model=JobOut, dependencies=[Depends(require_api_key)])
-def cancel_job(job_id: str, db: Session = Depends(get_db)) -> Job:
+def cancel_job(job_id: str, db: Session = Depends(get_db)) -> dict:
     job = db.get(Job, job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="job not found")
@@ -146,4 +183,4 @@ def cancel_job(job_id: str, db: Session = Depends(get_db)) -> Job:
         job.input_url = None
     db.commit()
     db.refresh(job)
-    return job
+    return _job_out(job, _queue_positions(db))

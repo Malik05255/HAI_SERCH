@@ -31,6 +31,7 @@ class JobOut(BaseModel):
     progress: float
     found_count: int
     attempts: int
+    queue_position: int | None = None
     created_at: datetime
     updated_at: datetime
 

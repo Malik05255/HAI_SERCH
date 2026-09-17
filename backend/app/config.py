@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     search_max_candidates: int = 250
     search_verify_pages_per_run: int = 40
     search_http_timeout_seconds: int = 15
-    search_max_active_jobs: int = 2
+    search_max_active_jobs: int = 5
     search_idle_sleep_seconds: int = 5
     search_max_attempts: int = 48
 

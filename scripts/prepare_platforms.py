@@ -16,11 +16,15 @@ if manifest.exists():
     manifest.write_text(text, encoding="utf-8")
 
 # Keep Android metadata explicit and reproducible for current Flutter/Firebase plugins.
+# The package identity is pinned because Android accepts an in-place APK update only
+# when applicationId + signing certificate match the installed version.
 gradle = ROOT / "android" / "app" / "build.gradle.kts"
 if gradle.exists():
     text = gradle.read_text(encoding="utf-8")
     text = text.replace("compileSdk = flutter.compileSdkVersion", "compileSdk = 36")
     text = text.replace("minSdk = flutter.minSdkVersion", "minSdk = 23")
+    text = text.replace('namespace = "com.hai.deep_search"', 'namespace = "com.hai.deep_search"')
+    text = text.replace('applicationId = "com.hai.deep_search"', 'applicationId = "com.hai.deep_search"')
 
     old = 'signingConfig = signingConfigs.getByName("debug")'
     new = '''signingConfig = signingConfigs.create("release") {

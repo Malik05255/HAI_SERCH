@@ -25,6 +25,7 @@ class Device(Base):
     account_id: Mapped[str] = mapped_column(ForeignKey("accounts.id", ondelete="CASCADE"), index=True)
     name: Mapped[str] = mapped_column(String(120), default="Device")
     token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    push_token: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 

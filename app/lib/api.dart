@@ -1,6 +1,5 @@
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
@@ -180,19 +179,26 @@ class ApiClient {
     );
     _ensureOk(response);
     final items = jsonDecode(response.body) as List<dynamic>;
-    return items.map((e) => SearchResult.fromJson(e as Map<String, dynamic>)).toList();
-  }
+    return items.map((item) {
+      final payload = Map<String, dynamic>.from(item as Map);
+      final id = (payload['id'] as num?)?.toInt() ?? 0;
+      final originalImage = (payload['image_url'] as String?)?.trim() ?? '';
+      final evidence = payload['evidence'] is Map
+          ? Map<String, dynamic>.from(payload['evidence'] as Map)
+          : <String, dynamic>{};
+      final capability = (evidence.remove('image_proxy_token') as String?)?.trim() ?? '';
+      payload['evidence'] = evidence;
 
-  Future<Uint8List?> resultImage(int resultId) async {
-    if (resultId <= 0) return null;
-    final response = await _authorized(
-      (headers) => http.get(Uri.parse('$baseUrl/v1/results/$resultId/image'), headers: headers),
-    );
-    if (const {404, 413, 415, 502}.contains(response.statusCode)) return null;
-    _ensureOk(response);
-    final contentType = response.headers['content-type']?.toLowerCase() ?? '';
-    if (!contentType.startsWith('image/') || response.bodyBytes.isEmpty) return null;
-    return response.bodyBytes;
+      // Never hand an external thumbnail URL to Flutter. A result image is
+      // rendered only through our server capability endpoint, so Android and
+      // Windows do not contact the source website directly.
+      if (id > 0 && originalImage.isNotEmpty && capability.isNotEmpty) {
+        payload['image_url'] = '$baseUrl/v1/result-images/$id?token=${Uri.encodeQueryComponent(capability)}';
+      } else {
+        payload['image_url'] = null;
+      }
+      return SearchResult.fromJson(payload);
+    }).toList();
   }
 
   Future<void> action(String jobId, String action) async {

@@ -22,7 +22,6 @@ class JobOut(BaseModel):
     id: str
     query: str
     input_type: str
-    input_url: str | None
     target_results: int
     status: str
     progress: float

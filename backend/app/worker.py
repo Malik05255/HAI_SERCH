@@ -7,7 +7,7 @@ from sqlalchemy import select
 from .budget import budget_for_job
 from .config import settings
 from .database import Base, SessionLocal, engine
-from .media import enrich_query
+from .media import delete_uploaded_media, enrich_query
 from .models import Result
 from .queue import claim_next_job, requeue
 from .research import run_research
@@ -17,21 +17,33 @@ def utcnow():
     return datetime.now(timezone.utc)
 
 
+def purge_job_media(job) -> None:
+    if job.input_url:
+        delete_uploaded_media(job.input_url)
+        job.input_url = None
+
+
+def finish_job(db, job, status: str, progress: float | None = None) -> None:
+    job.status = status
+    if progress is not None:
+        job.progress = progress
+    purge_job_media(job)
+    db.commit()
+
+
 def process_one() -> bool:
     with SessionLocal() as db:
         job = claim_next_job(db)
         if job is None:
             return False
         if job.stop_requested:
-            job.status = "stopped"
-            db.commit()
+            finish_job(db, job, "stopped")
             return True
 
         budget = budget_for_job(job.attempts - 1)
         effective_query = enrich_query(job.query, job.input_url, job.input_type, budget.video_keyframes)
         if not effective_query:
-            job.status = "needs_context"
-            db.commit()
+            finish_job(db, job, "needs_context")
             return True
 
         try:
@@ -71,22 +83,22 @@ def process_one() -> bool:
             job.heartbeat_at = utcnow()
 
             if job.stop_requested:
-                job.status = "stopped"
-                db.commit()
+                finish_job(db, job, "stopped")
             elif job.found_count >= job.target_results:
-                job.status = "completed"
-                job.progress = 1.0
-                db.commit()
+                finish_job(db, job, "completed", 1.0)
             elif job.attempts >= settings.search_max_attempts:
-                job.status = "partial"
-                db.commit()
+                finish_job(db, job, "partial")
             else:
                 db.commit()
                 requeue(db, job)
         except Exception:
-            job.status = "queued" if job.attempts < settings.search_max_attempts else "failed"
-            db.commit()
-            if job.status == "queued":
+            if job.stop_requested:
+                finish_job(db, job, "stopped")
+            elif job.attempts >= settings.search_max_attempts:
+                finish_job(db, job, "failed")
+            else:
+                job.status = "queued"
+                db.commit()
                 requeue(db, job)
         return True
 

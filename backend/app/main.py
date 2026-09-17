@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from .config import settings
 from .database import Base, engine, get_db
+from .media import delete_uploaded_media
 from .models import Job, Result
 from .schemas import JobCreate, JobOut, ResultOut
 
@@ -60,7 +61,7 @@ async def upload(file: UploadFile) -> dict:
     else:
         destination.unlink(missing_ok=True)
         raise HTTPException(status_code=415, detail="unsupported media type")
-    return {"input_url": str(destination), "input_type": input_type, "size": written}
+    return {"input_url": str(destination), "input_type": input_type, "size": written, "temporary": True}
 
 
 @app.post("/v1/jobs", response_model=JobOut, dependencies=[Depends(require_api_key)])
@@ -100,8 +101,12 @@ def stop_job(job_id: str, db: Session = Depends(get_db)) -> Job:
     job = db.get(Job, job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="job not found")
+    was_running = job.status == "running"
     job.stop_requested = True
     job.status = "stopped"
+    if not was_running and job.input_url:
+        delete_uploaded_media(job.input_url)
+        job.input_url = None
     db.commit()
     db.refresh(job)
     return job

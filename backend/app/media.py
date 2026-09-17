@@ -21,6 +21,18 @@ def _safe_local_path(value: str | None) -> Path | None:
         return None
 
 
+def delete_uploaded_media(value: str | None) -> bool:
+    """Delete an uploaded media file only when it is inside DATA_DIR."""
+    path = _safe_local_path(value)
+    if path is None:
+        return False
+    try:
+        path.unlink(missing_ok=True)
+        return True
+    except OSError:
+        return False
+
+
 def _ocr(path: Path) -> str:
     try:
         result = subprocess.run(

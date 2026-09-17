@@ -24,6 +24,9 @@ def ensure_schema() -> None:
         connection.exec_driver_sql("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS last_error TEXT NULL")
         connection.exec_driver_sql("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS context_text TEXT NOT NULL DEFAULT ''")
         connection.exec_driver_sql("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS context_revision INTEGER NOT NULL DEFAULT 0")
+        connection.exec_driver_sql("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS notification_pending BOOLEAN NOT NULL DEFAULT FALSE")
+        connection.exec_driver_sql("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS notification_sent_at TIMESTAMPTZ NULL")
+        connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_jobs_notification_pending ON jobs (notification_pending)")
         connection.exec_driver_sql("ALTER TABLE devices ADD COLUMN IF NOT EXISTS push_token TEXT NULL")
 
 

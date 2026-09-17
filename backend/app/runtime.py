@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 
 from .config import settings
-from .database import Base, SessionLocal, engine
+from .database import SessionLocal, ensure_schema
 from .maintenance import cleanup_orphan_uploads, recover_interrupted_jobs
 from .models import Job
 from .notifications import send_job_pushes
@@ -17,7 +17,7 @@ NOTIFIABLE_STATES = ("completed", "partial", "failed", "needs_context")
 
 
 def main() -> None:
-    Base.metadata.create_all(bind=engine)
+    ensure_schema()
     try:
         with SessionLocal() as db:
             recover_interrupted_jobs(db)

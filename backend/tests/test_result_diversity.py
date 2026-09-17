@@ -1,5 +1,5 @@
 from app.models import Result
-from app.worker import _diverse_order, _same_work_title
+from app.worker import _annotate_supporting_sources, _diverse_order, _same_work_title
 
 
 def _result(title: str, url: str, score: float = 80.0) -> Result:
@@ -58,3 +58,32 @@ def test_domain_limit_is_soft_but_duplicate_limit_is_hard() -> None:
         "Beta (2021)",
         "Gamma (2022)",
     ]
+
+
+def test_supporting_sources_keep_one_url_per_independent_domain() -> None:
+    results = [
+        _result("Inception (2010) Review", "https://a.example/inception", 95),
+        _result("Inception - IMDb", "https://b.example/title/tt1375666", 93),
+        _result("Inception trailer", "https://a.example/inception-trailer", 91),
+    ]
+
+    _annotate_supporting_sources(results)
+
+    evidence = results[0].evidence
+    assert evidence["supporting_source_count"] == 2
+    assert evidence["supporting_sources"] == [
+        {"domain": "a.example", "url": "https://a.example/inception"},
+        {"domain": "b.example", "url": "https://b.example/title/tt1375666"},
+    ]
+
+
+def test_supporting_sources_do_not_cross_different_remake_years() -> None:
+    results = [
+        _result("Crash (1996)", "https://a.example/crash-1996", 95),
+        _result("Crash (2004)", "https://b.example/crash-2004", 93),
+    ]
+
+    _annotate_supporting_sources(results)
+
+    assert results[0].evidence["supporting_source_count"] == 1
+    assert results[1].evidence["supporting_source_count"] == 1

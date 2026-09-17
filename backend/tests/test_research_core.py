@@ -1,7 +1,10 @@
 from collections import Counter
+import io
+
+from PIL import Image, ImageDraw
 
 from app.models import Job, Result
-from app.research import _best_overlap, _visual_match, make_queries, overlap_score
+from app.research import _best_overlap, _image_hash_variants, _visual_match, make_queries, overlap_score
 from app.worker import _diverse_order, _effective_query, _image_capability, _safe_error
 
 
@@ -67,6 +70,29 @@ def test_visual_hash_exact_match_scores_maximum() -> None:
     score, distance = _visual_match(["0000000000000000"], "0000000000000000")
     assert distance == 0
     assert score == 100.0
+
+
+def test_visual_match_uses_best_candidate_variant() -> None:
+    score, distance = _visual_match(
+        ["0000000000000000"],
+        ["ffffffffffffffff", "0000000000000000"],
+    )
+
+    assert distance == 0
+    assert score == 100.0
+
+
+def test_result_image_hashes_include_full_and_centered_variants() -> None:
+    image = Image.new("RGB", (200, 140), "white")
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((35, 25, 165, 115), fill="black")
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+
+    hashes = _image_hash_variants(buffer.getvalue())
+
+    assert 1 <= len(hashes) <= 3
+    assert all(len(value) == 16 for value in hashes)
 
 
 def test_safe_error_redacts_url_credentials_and_limits_output() -> None:

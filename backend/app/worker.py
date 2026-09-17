@@ -18,10 +18,20 @@ from .research import run_research
 
 
 TITLE_TOKEN_RE = re.compile(r"[^\w\u0600-\u06ff]+", re.UNICODE)
+CREDENTIAL_URL_RE = re.compile(r"://[^@\s]+@")
 
 
 def utcnow():
     return datetime.now(timezone.utc)
+
+
+def _safe_error(error: Exception) -> str:
+    detail = " ".join(str(error).split())
+    detail = CREDENTIAL_URL_RE.sub("://***@", detail)
+    name = type(error).__name__
+    if not detail:
+        return name[:300]
+    return f"{name}: {detail}"[:300]
 
 
 def purge_job_media(job) -> None:
@@ -91,7 +101,6 @@ def _diverse_order(results: list[Result], target: int) -> list[Result]:
         else:
             deferred.append(result)
 
-    # If strict diversity produced fewer than requested, fill remaining slots by score.
     if len(selected) < target:
         needed = target - len(selected)
         selected.extend(deferred[:needed])
@@ -112,10 +121,8 @@ def process_one() -> bool:
         budget = budget_for_job(job.attempts - 1)
         features = media_features(job.input_url, job.input_type, budget.video_keyframes)
 
-        # A media search must not silently degrade to OCR/text-only research when
-        # visual understanding is enabled. If Vision is still starting or failed
-        # transiently, keep the task queued and retry later.
         if job.input_type in {"image", "video"} and settings.vision_enabled and not features.get("vision"):
+            job.last_error = "visual_analysis_unavailable"
             if job.attempts >= settings.search_max_attempts:
                 finish_job(db, job, "failed")
             else:
@@ -126,6 +133,7 @@ def process_one() -> bool:
         effective_query = _effective_query(job, features)
         hashes = list(features.get("hashes", []))
         if not effective_query:
+            job.last_error = "insufficient_context"
             finish_job(db, job, "needs_context")
             return True
 
@@ -200,6 +208,7 @@ def process_one() -> bool:
             job.found_count = len(top)
             job.progress = min(1.0, job.found_count / max(job.target_results, 1))
             job.heartbeat_at = utcnow()
+            job.last_error = None
 
             if job.found_count >= job.target_results:
                 finish_job(db, job, "completed", 1.0)
@@ -208,8 +217,9 @@ def process_one() -> bool:
             else:
                 db.commit()
                 requeue(db, job)
-        except Exception:
+        except Exception as error:
             db.refresh(job)
+            job.last_error = _safe_error(error)
             if job.status == "cancelled":
                 purge_job_media(job)
                 db.commit()

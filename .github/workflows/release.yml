@@ -3,13 +3,26 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version, for example v1.0.0"
+        required: true
+        type: string
 
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.ref }}-${{ inputs.version || github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
   validate:
     runs-on: ubuntu-latest
+    outputs:
+      release_tag: ${{ steps.meta.outputs.release_tag }}
+      release_version: ${{ steps.meta.outputs.release_version }}
     env:
       API_BASE_URL: ${{ secrets.API_BASE_URL }}
       ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
@@ -20,12 +33,20 @@ jobs:
       FIREBASE_APP_ID: ${{ secrets.FIREBASE_APP_ID }}
       FIREBASE_MESSAGING_SENDER_ID: ${{ secrets.FIREBASE_MESSAGING_SENDER_ID }}
       FIREBASE_PROJECT_ID: ${{ secrets.FIREBASE_PROJECT_ID }}
+      MANUAL_VERSION: ${{ inputs.version }}
     steps:
-      - name: Validate version tag and release configuration
+      - id: meta
+        name: Resolve and validate release metadata
         shell: bash
         run: |
-          [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]] || {
-            echo "Release tag must look like v1.2.3"
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            TAG="$MANUAL_VERSION"
+          else
+            TAG="$GITHUB_REF_NAME"
+          fi
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]] || {
+            echo "Release version must look like v1.2.3"
             exit 1
           }
           for key in \
@@ -46,11 +67,14 @@ jobs:
             echo "API_BASE_URL must not end with a slash"
             exit 1
           }
+          echo "release_tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "release_version=${TAG#v}" >> "$GITHUB_OUTPUT"
 
   android:
     needs: validate
     runs-on: ubuntu-latest
     env:
+      RELEASE_VERSION: ${{ needs.validate.outputs.release_version }}
       ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
       ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
       ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
@@ -84,12 +108,11 @@ jobs:
       - name: Run Flutter tests
         working-directory: app
         run: flutter test
-      - name: Build APK
+      - name: Build signed APK
         working-directory: app
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
           flutter build apk --release \
-            --build-name="$VERSION" \
+            --build-name="$RELEASE_VERSION" \
             --build-number="$GITHUB_RUN_NUMBER" \
             --dart-define="API_BASE_URL=${{ secrets.API_BASE_URL }}" \
             --dart-define="FIREBASE_API_KEY=${{ secrets.FIREBASE_API_KEY }}" \
@@ -110,6 +133,8 @@ jobs:
   windows:
     needs: validate
     runs-on: windows-latest
+    env:
+      RELEASE_VERSION: ${{ needs.validate.outputs.release_version }}
     steps:
       - uses: actions/checkout@v4
       - uses: subosito/flutter-action@v2
@@ -128,19 +153,19 @@ jobs:
           if (-not (Test-Path app\windows\runner\resources\app_icon.ico)) { throw "Windows icon missing" }
       - run: flutter pub get
         working-directory: app
+      - name: Run Flutter tests
+        working-directory: app
+        run: flutter test
       - name: Build Windows
         working-directory: app
         shell: pwsh
-        run: |
-          $version = "${{ github.ref_name }}".TrimStart('v')
-          flutter build windows --release --build-name=$version --build-number=${{ github.run_number }} --dart-define=API_BASE_URL=${{ secrets.API_BASE_URL }}
+        run: flutter build windows --release --build-name=$env:RELEASE_VERSION --build-number=${{ github.run_number }} --dart-define=API_BASE_URL=${{ secrets.API_BASE_URL }}
       - name: Install Inno Setup
         run: choco install innosetup --no-progress -y
       - name: Build installer
         shell: pwsh
         run: |
-          $version = "${{ github.ref_name }}".TrimStart('v')
-          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "/DMyAppVersion=$version" installer\windows.iss
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "/DMyAppVersion=$env:RELEASE_VERSION" installer\windows.iss
           Copy-Item installer\dist\deep-search-windows-setup.exe deep-search-windows-setup.exe
           $hash = (Get-FileHash deep-search-windows-setup.exe -Algorithm SHA256).Hash.ToLower()
           "$hash  deep-search-windows-setup.exe" | Out-File -FilePath deep-search-windows-setup.exe.sha256 -Encoding ascii
@@ -152,7 +177,7 @@ jobs:
             deep-search-windows-setup.exe.sha256
 
   publish:
-    needs: [android, windows]
+    needs: [validate, android, windows]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -161,6 +186,10 @@ jobs:
           merge-multiple: true
       - uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ needs.validate.outputs.release_tag }}
+          target_commitish: ${{ github.sha }}
+          name: البحث العميق ${{ needs.validate.outputs.release_tag }}
+          generate_release_notes: true
           files: |
             dist/deep-search-android.apk
             dist/deep-search-android.apk.sha256

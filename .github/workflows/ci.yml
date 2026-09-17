@@ -29,6 +29,8 @@ jobs:
           cp .env.example .env
           docker compose -f docker-compose.yml config >/dev/null
           docker compose -f docker-compose.yml -f docker-compose.vpn.yml config >/dev/null
+          docker compose -f docker-compose.yml -f docker-compose.prod.yml config >/dev/null
+          python scripts/validate_production_env.py .env.example --example
       - name: Build VPN proxy sidecar
         run: docker build -t deep-search-egress-ci infra/egress
 

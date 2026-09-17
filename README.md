@@ -125,3 +125,17 @@
 10. صور النتائج محدودة الحجم وتُجلب عبر Egress الآمن بدل الاتصال المباشر من الجهاز بالموقع الخارجي.
 
 راجع `docs/ARCHITECTURE.md` و `docs/FREE_TIER_BUDGET.md` للتفاصيل.
+
+
+## Production
+
+المستودع يحتوي الآن مسار إنتاج كامل:
+
+- `docker-compose.prod.yml` يضيف Caddy وHTTPS تلقائي.
+- `scripts/bootstrap_server.sh` يجهز Docker على Ubuntu.
+- `scripts/validate_production_env.py` يمنع التشغيل بقيم افتراضية أو إعداد TLS/Firebase غير صحيح.
+- `scripts/deploy_server.sh` ينشر بدون `down` ويتحقق من health ثم يحاول rollback عند الفشل.
+- Workflow **Deploy Production** ينشر عبر SSH باستخدام GitHub Environment secrets.
+- Workflow **Release** يدعم tag أو تشغيل يدوي لنسخة مثل `v1.0.0`.
+
+التفاصيل في `docs/PRODUCTION.md`.

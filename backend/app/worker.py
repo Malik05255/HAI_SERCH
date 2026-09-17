@@ -227,6 +227,53 @@ def _diverse_order(results: list[Result], target: int) -> list[Result]:
     return selected
 
 
+def _annotate_supporting_sources(results: list[Result], max_sources: int = 6) -> None:
+    """Attach one representative URL per independent domain to the best page."""
+    if not results:
+        return
+
+    # Remove stale aggregation from previous rounds before rebuilding it from
+    # the currently credible result set.
+    for result in results:
+        evidence = dict(result.evidence or {})
+        evidence.pop("supporting_source_count", None)
+        evidence.pop("supporting_sources", None)
+        result.evidence = evidence
+
+    groups: list[list[Result]] = []
+    for result in results:
+        group = next(
+            (
+                existing
+                for existing in groups
+                if _same_work_title(result.title, existing[0].title)
+            ),
+            None,
+        )
+        if group is None:
+            groups.append([result])
+        else:
+            group.append(result)
+
+    for group in groups:
+        primary = group[0]
+        seen_domains: set[str] = set()
+        sources: list[dict[str, str]] = []
+        for result in group:
+            domain = _domain(result.url)
+            if not domain or domain in seen_domains:
+                continue
+            seen_domains.add(domain)
+            sources.append({"domain": domain, "url": result.url})
+            if len(sources) >= max_sources:
+                break
+
+        evidence = dict(primary.evidence or {})
+        evidence["supporting_source_count"] = len(sources)
+        evidence["supporting_sources"] = sources
+        primary.evidence = evidence
+
+
 def _image_capability(existing_result: Result | None, candidate_image_url: str | None) -> str | None:
     current = ""
     if existing_result is not None and isinstance(existing_result.evidence, dict):
@@ -373,6 +420,7 @@ def process_one() -> bool:
                     .order_by(Result.match_score.desc(), Result.id.asc())
                 ).all()
             )
+            _annotate_supporting_sources(credible_results)
             ordered = _diverse_order(credible_results, job.target_results)
             top = ordered[: job.target_results]
 

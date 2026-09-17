@@ -63,8 +63,9 @@ class UpdateService {
       final response = await http
           .get(Uri.parse(_latestRelease), headers: {'Accept': 'application/vnd.github+json'})
           .timeout(const Duration(seconds: 12));
-      if (response.statusCode == 404) return null;
       if (response.statusCode != 200) {
+        // 404 means there is no published release to compare against, which is
+        // not proof that the installed build is the newest one.
         lastCheckFailed = true;
         return null;
       }

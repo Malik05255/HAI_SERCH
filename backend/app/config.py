@@ -50,7 +50,9 @@ class Settings(BaseSettings):
     visual_hash_max_distance: int = 14
 
     cloud_media_quota_gb: int = 20
-    temp_file_ttl_hours: int = 24
+    # Unclaimed uploads are not user archives. Keep only a short grace period
+    # for upload->job network retries, then purge them automatically.
+    temp_file_ttl_hours: int = 1
 
     notifications_enabled: bool = False
     firebase_project_id: str = ""

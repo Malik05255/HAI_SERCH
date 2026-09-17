@@ -20,6 +20,7 @@ class ApiClient {
   final StreamController<void> _jobChanges = StreamController<void>.broadcast();
   String? _token;
   bool _initialized = false;
+  bool _authRevoked = false;
   bool _connectingRealtime = false;
   bool _realtimeUnauthorized = false;
   WebSocket? _socket;
@@ -27,6 +28,7 @@ class ApiClient {
   Timer? _pingTimer;
 
   Stream<void> get jobChanges => _jobChanges.stream;
+  bool get authorizationRevoked => _authRevoked;
 
   String get deviceName {
     if (Platform.isWindows) return 'Windows';
@@ -46,6 +48,7 @@ class ApiClient {
 
   Future<void> init() async {
     if (_initialized) return;
+    if (_authRevoked) throw StateError('device authorization revoked');
     _token = await _storage.read(key: 'deep_search_device_token');
     if (_token == null || _token!.isEmpty) {
       await _register();
@@ -72,6 +75,7 @@ class ApiClient {
       await _stopRealtime();
     }
     _token = token;
+    _authRevoked = false;
     _realtimeUnauthorized = false;
     await _storage.write(key: 'deep_search_device_token', value: token);
     final id = payload['device_id'] as String?;
@@ -79,13 +83,15 @@ class ApiClient {
     await NotificationService.refreshRegistration();
   }
 
-  Future<void> _recoverAuth() async {
+  Future<void> _markAuthRevoked() async {
+    if (_authRevoked) return;
+    _authRevoked = true;
+    _realtimeUnauthorized = true;
     await _stopRealtime();
     _token = null;
     _initialized = false;
     await _storage.delete(key: 'deep_search_device_token');
     await _storage.delete(key: 'deep_search_device_id');
-    await init();
   }
 
   Future<void> _stopRealtime() async {
@@ -103,7 +109,7 @@ class ApiClient {
   }
 
   void _scheduleRealtimeReconnect() {
-    if (!_initialized || _realtimeUnauthorized || _reconnectTimer?.isActive == true) return;
+    if (!_initialized || _authRevoked || _realtimeUnauthorized || _reconnectTimer?.isActive == true) return;
     _reconnectTimer = Timer(const Duration(seconds: 3), () {
       _reconnectTimer = null;
       unawaited(_ensureRealtime());
@@ -122,6 +128,7 @@ class ApiClient {
 
   Future<void> _ensureRealtime() async {
     if (!_initialized ||
+        _authRevoked ||
         _realtimeUnauthorized ||
         _connectingRealtime ||
         _socket != null ||
@@ -160,7 +167,7 @@ class ApiClient {
             _pingTimer = null;
           }
           if (socket.closeCode == 4401) {
-            _realtimeUnauthorized = true;
+            unawaited(_markAuthRevoked());
             return;
           }
           _scheduleRealtimeReconnect();
@@ -193,10 +200,10 @@ class ApiClient {
   Future<http.Response> _authorized(
     Future<http.Response> Function(Map<String, String> headers) request,
   ) async {
-    var response = await request(await _headers());
+    final response = await request(await _headers());
     if (response.statusCode == 401) {
-      await _recoverAuth();
-      response = await request(await _headers());
+      await _markAuthRevoked();
+      throw StateError('device authorization revoked');
     }
     return response;
   }
@@ -284,10 +291,10 @@ class ApiClient {
   }
 
   Future<Map<String, dynamic>> upload(String path) async {
-    var response = await _uploadOnce(path);
+    final response = await _uploadOnce(path);
     if (response.statusCode == 401) {
-      await _recoverAuth();
-      response = await _uploadOnce(path);
+      await _markAuthRevoked();
+      throw StateError('device authorization revoked');
     }
     _ensureOk(response);
     return jsonDecode(response.body) as Map<String, dynamic>;
@@ -334,10 +341,10 @@ class ApiClient {
         request.headers['Authorization'] = 'Bearer $_token';
         final response = await client.send(request);
 
-        if (response.statusCode == 401 && attempt == 0) {
+        if (response.statusCode == 401) {
           await response.stream.drain<void>();
-          await _recoverAuth();
-          continue;
+          await _markAuthRevoked();
+          throw StateError('device authorization revoked');
         }
         if (response.statusCode < 200 || response.statusCode >= 300) {
           final body = await response.stream.bytesToString();

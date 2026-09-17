@@ -28,6 +28,13 @@ class Settings(BaseSettings):
     whisper_enabled: bool = True
     whisper_cli_path: str = "/usr/local/bin/whisper-cli"
     whisper_model_path: str = "/opt/whisper.cpp/models/ggml-tiny.bin"
+
+    vision_enabled: bool = True
+    vision_url: str = "http://vision:8081"
+    vision_max_frames: int = 4
+    vision_timeout_seconds: int = 90
+    visual_hash_max_distance: int = 14
+
     cloud_media_quota_gb: int = 20
     temp_file_ttl_hours: int = 24
 

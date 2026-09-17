@@ -1,3 +1,12 @@
+String? _safeResultImageUrl(dynamic value) {
+  final raw = value is String ? value.trim() : '';
+  if (raw.isEmpty) return null;
+  final uri = Uri.tryParse(raw);
+  if (uri == null || !const {'http', 'https'}.contains(uri.scheme)) return null;
+  if (!uri.path.startsWith('/v1/result-images/')) return null;
+  return raw;
+}
+
 class SearchJob {
   const SearchJob({
     required this.id,
@@ -96,7 +105,7 @@ class SearchResult {
         url: (json['url'] as String?) ?? '',
         summary: (json['summary'] as String?) ?? '',
         score: (json['match_score'] as num?)?.toDouble() ?? (json['score'] as num?)?.toDouble() ?? 0,
-        imageUrl: json['image_url'] as String?,
+        imageUrl: _safeResultImageUrl(json['image_url']),
         evidence: json['evidence'] is Map
             ? Map<String, dynamic>.from(json['evidence'] as Map)
             : const <String, dynamic>{},

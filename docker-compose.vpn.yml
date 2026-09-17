@@ -1,0 +1,36 @@
+services:
+  wireguard:
+    image: lscr.io/linuxserver/wireguard:latest
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+      TZ: ${TZ:-Asia/Riyadh}
+    volumes:
+      - ./infra/wireguard:/config
+      - /lib/modules:/lib/modules:ro
+    sysctls:
+      - net.ipv4.conf.all.src_valid_mark=1
+    mem_limit: 256m
+
+  vpn-proxy:
+    build: ./infra/egress
+    restart: unless-stopped
+    network_mode: "service:wireguard"
+    depends_on:
+      wireguard:
+        condition: service_started
+    mem_limit: 64m
+
+  worker:
+    environment:
+      EGRESS_MODE: ${EGRESS_MODE:-auto}
+      EGRESS_PROXY_URL: http://wireguard:8888
+    depends_on:
+      wireguard:
+        condition: service_started
+      vpn-proxy:
+        condition: service_started

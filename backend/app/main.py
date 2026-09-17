@@ -1,7 +1,9 @@
+from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, HTTPException, UploadFile
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
@@ -17,7 +19,8 @@ from .schemas import JobCreate, JobOut, ResultOut
 
 CREATE_LOCK_KEY = 847251902
 FINAL_STATES = ("completed", "partial", "failed", "needs_context", "cancelled")
-app = FastAPI(title=settings.app_name, version="0.5.0")
+CONTINUABLE_STATES = ("completed", "partial", "failed", "needs_context")
+app = FastAPI(title=settings.app_name, version="0.6.0")
 
 
 class DeviceCreate(BaseModel):
@@ -49,6 +52,18 @@ def _queue_positions(db: Session, account_id: str) -> dict[str, int]:
     return {job.id: index for index, job in enumerate(jobs, start=1)}
 
 
+def _media_path(job: Job, account_id: str) -> Path | None:
+    if not job.input_url:
+        return None
+    try:
+        path = Path(job.input_url).resolve(strict=True)
+        root = account_upload_root(account_id).resolve(strict=True)
+        path.relative_to(root)
+        return path
+    except (OSError, ValueError):
+        return None
+
+
 def _job_out(job: Job, positions: dict[str, int]) -> dict:
     return {
         "id": job.id,
@@ -60,6 +75,7 @@ def _job_out(job: Job, positions: dict[str, int]) -> dict:
         "found_count": job.found_count,
         "attempts": job.attempts,
         "queue_position": positions.get(job.id),
+        "media_available": bool(job.input_url and Path(job.input_url).is_file()),
         "created_at": job.created_at,
         "updated_at": job.updated_at,
     }
@@ -70,6 +86,18 @@ def _owned_job(db: Session, job_id: str, principal: Principal) -> Job:
     if job is None:
         raise HTTPException(status_code=404, detail="job not found")
     return job
+
+
+def _lock_capacity(db: Session, account_id: str) -> None:
+    db.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": CREATE_LOCK_KEY})
+    active_count = db.scalar(
+        select(func.count()).select_from(Job).where(
+            Job.account_id == account_id,
+            Job.status.in_(ACTIVE_STATES),
+        )
+    ) or 0
+    if active_count >= settings.search_max_active_jobs:
+        raise HTTPException(status_code=429, detail="search queue is full (5/5)")
 
 
 @app.get("/health")
@@ -146,7 +174,7 @@ async def upload(file: UploadFile, principal: Principal = Depends(require_princi
     else:
         destination.unlink(missing_ok=True)
         raise HTTPException(status_code=415, detail="unsupported media type")
-    return {"upload_id": key, "input_type": input_type, "size": written, "temporary": True}
+    return {"upload_id": key, "input_type": input_type, "size": written, "temporary": False}
 
 
 @app.post("/v1/jobs", response_model=JobOut)
@@ -159,25 +187,20 @@ def create_job(
     if payload.upload_id:
         path = resolve_upload_id(payload.upload_id, principal.account_id)
         if path is None:
-            raise HTTPException(status_code=404, detail="temporary upload not found")
+            raise HTTPException(status_code=404, detail="upload not found")
         suffix = path.suffix.casefold()
         actual_type = "video" if suffix in VIDEO_EXTS else "image" if suffix in IMAGE_EXTS else None
         if actual_type is None or actual_type != payload.input_type:
             raise HTTPException(status_code=422, detail="upload type mismatch")
         input_url = str(path)
 
-    db.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": CREATE_LOCK_KEY})
-    active_count = db.scalar(
-        select(func.count()).select_from(Job).where(
-            Job.account_id == principal.account_id,
-            Job.status.in_(ACTIVE_STATES),
-        )
-    ) or 0
-    if active_count >= settings.search_max_active_jobs:
+    try:
+        _lock_capacity(db, principal.account_id)
+    except HTTPException:
         if input_url:
             delete_uploaded_media(input_url)
         db.rollback()
-        raise HTTPException(status_code=429, detail="search queue is full (5/5)")
+        raise
 
     job = Job(
         account_id=principal.account_id,
@@ -224,6 +247,16 @@ def get_results(job_id: str, principal: Principal = Depends(require_principal), 
     return list(db.scalars(select(Result).where(Result.job_id == job_id).order_by(Result.rank.asc())).all())
 
 
+@app.get("/v1/jobs/{job_id}/media")
+def get_media(job_id: str, principal: Principal = Depends(require_principal), db: Session = Depends(get_db)):
+    job = _owned_job(db, job_id, principal)
+    path = _media_path(job, principal.account_id)
+    if path is None:
+        raise HTTPException(status_code=404, detail="media not available")
+    media_type = "video/mp4" if job.input_type == "video" and path.suffix.casefold() == ".mp4" else None
+    return FileResponse(path, media_type=media_type, filename=f"deep-search-{job.id}{path.suffix.casefold()}")
+
+
 @app.post("/v1/jobs/{job_id}/stop", response_model=JobOut)
 def stop_job(job_id: str, principal: Principal = Depends(require_principal), db: Session = Depends(get_db)) -> dict:
     job = _owned_job(db, job_id, principal)
@@ -241,8 +274,28 @@ def resume_job(job_id: str, principal: Principal = Depends(require_principal), d
     if job.status == "stopped":
         job.stop_requested = False
         job.status = "queued"
+        job.next_run_at = datetime.now(timezone.utc)
         db.commit()
         db.refresh(job)
+    return _job_out(job, _queue_positions(db, principal.account_id))
+
+
+@app.post("/v1/jobs/{job_id}/continue", response_model=JobOut)
+def continue_job(job_id: str, principal: Principal = Depends(require_principal), db: Session = Depends(get_db)) -> dict:
+    job = _owned_job(db, job_id, principal)
+    if job.status not in CONTINUABLE_STATES:
+        raise HTTPException(status_code=409, detail="job cannot be continued from current state")
+    if job.input_type != "text" and _media_path(job, principal.account_id) is None:
+        raise HTTPException(status_code=409, detail="cloud media is no longer available")
+    _lock_capacity(db, principal.account_id)
+    job.stop_requested = False
+    job.status = "queued"
+    job.progress = 0.0
+    job.attempts = 0
+    job.next_run_at = datetime.now(timezone.utc)
+    job.created_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(job)
     return _job_out(job, _queue_positions(db, principal.account_id))
 
 

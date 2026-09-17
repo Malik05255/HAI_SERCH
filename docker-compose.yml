@@ -81,7 +81,7 @@ services:
     build: ./backend
     restart: unless-stopped
     env_file: .env
-    command: ["python", "-m", "app.worker"]
+    command: ["python", "-m", "app.runtime"]
     volumes:
       - ./data:/data
     depends_on:
